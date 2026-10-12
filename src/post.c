@@ -107,7 +107,7 @@ bda_init(void)
 
     // Init extra stack
     StackPos = &ExtraStack[BUILD_EXTRA_STACK_SIZE] - SYMBOL(zonelow_base);
-    dprintf(1, "stackpos %p %p %x\n", StackPos, ExtraStack, SYMBOL(zonelow_base));
+    dprintf(3, "stackpos %p %p %x\n", StackPos, ExtraStack, SYMBOL(zonelow_base));
 }
 
 void
@@ -209,7 +209,7 @@ struct int_vec {
 	volatile struct int_vec *vec = (struct int_vec *)0;
 
 	for (unsigned interrupt=0; interrupt<256; interrupt++) {
-		dprintf(1, "%02x %04x:%04x\n",
+		dprintf(3, "%02x %04x:%04x\n",
 			interrupt,
 			vec[interrupt].cs,
 			vec[interrupt].ip
@@ -264,6 +264,7 @@ maininit(void)
         post_code(POST_MEMTEST);
         setup_memtest();
         post_code(POST_OPTIONROMS);
+        setup_isapnp();
     }
 
     // Run option roms

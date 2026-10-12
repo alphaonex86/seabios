@@ -109,7 +109,7 @@ ipchksum(char *buf, int count)
 static struct cb_header *
 find_cb_header(u32 addr, int len)
 {
-   dprintf(1, "find_cb_header\n");
+   dprintf(3, "find_cb_header\n");
 
     u32 end = addr + len;
     for (; addr < end; addr += 16) {
@@ -119,35 +119,35 @@ find_cb_header(u32 addr, int len)
 #endif
 
 #if 0
-        dprintf(1, "%3x: ", addr);
+        dprintf(3, "%3x: ", addr);
         for (unsigned idx=0;idx<16;idx++) {
-                dprintf(1, "%02x ",dptr[idx]);
+                dprintf(3, "%02x ",dptr[idx]);
         }
-        dprintf(1, "\n");
+        dprintf(3, "\n");
 #endif
         struct cb_header *cbh = (void*)addr;
         if (GET_FARVAR(0, cbh->signature) != CB_SIGNATURE)
             continue;
 
 #if 0
-        dprintf(1, "signature OK, dump: ");
+        dprintf(3, "signature OK, dump: ");
         for (unsigned idx=0;idx<24;idx++) {
-                dprintf(1, "%02x ",dptr[idx]);
+                dprintf(3, "%02x ",dptr[idx]);
         }
-        dprintf(1, "\n");
+        dprintf(3, "\n");
 #endif
 
         u32 tsize = GET_FARVAR(0, cbh->table_bytes);
-        dprintf(1, "size %x\n", tsize);
+        dprintf(3, "size %x\n", tsize);
         if (! tsize)
             continue;
         if (ipchksum((void*)addr, sizeof(*cbh)) != 0)
             continue;
-        dprintf(1, "checksum %u %x %x\n", sizeof(*cbh), ipchksum((void*)addr + sizeof(*cbh), tsize), GET_FARVAR(0, cbh->table_checksum));
+        dprintf(3, "checksum %u %x %x\n", sizeof(*cbh), ipchksum((void*)addr + sizeof(*cbh), tsize), GET_FARVAR(0, cbh->table_checksum));
         if (ipchksum((void*)addr + sizeof(*cbh), tsize)
             != GET_FARVAR(0, cbh->table_checksum))
             continue;
-        dprintf(1, "checksum2\n");
+        dprintf(3, "checksum2\n");
         return cbh;
     }
     return NULL;
@@ -174,7 +174,7 @@ find_cb_subtable(struct cb_header *cbh, u32 tag)
 struct cb_header *
 find_cb_table(void)
 {
-dprintf(1, "find cb table\n");
+dprintf(3, "find cb table\n");
 
     struct cb_header *cbh = find_cb_header(0, 0x1000);
     if (!cbh) {
@@ -182,11 +182,11 @@ dprintf(1, "find cb table\n");
         return NULL;
         }
 
-dprintf(1, "cb header found, find subtable\n");
+dprintf(3, "cb header found, find subtable\n");
 
     struct cb_forward *cbf = find_cb_subtable(cbh, CB_TAG_FORWARD);
     if (cbf) {
-        dprintf(1, "!!!!! Found coreboot table forwarder.\n");
+        dprintf(3, "!!!!! Found coreboot table forwarder.\n");
         cbh = find_cb_header(GET_FARVAR(0, cbf->forward), 0x100);
         if (!cbh) {
         dprintf(1, "CB forwarded table not found\n");
@@ -206,13 +206,13 @@ coreboot_preinit(void)
     if (!CONFIG_COREBOOT)
         return;
 
-    dprintf(1, "Attempting to find coreboot table\n");
+    dprintf(3, "Attempting to find coreboot table\n");
 
     // Find coreboot table.
     struct cb_header *cbh = find_cb_table();
     if (!cbh)
         goto fail;
-    dprintf(1, "Now attempting to find coreboot memory map\n");
+    dprintf(3, "Now attempting to find coreboot memory map\n");
     struct cb_memory *cbm = CBMemTable = find_cb_subtable(cbh, CB_TAG_MEMORY);
     if (!cbm)
         goto fail;
@@ -224,7 +224,7 @@ coreboot_preinit(void)
         if (type == CB_MEM_TABLE)
             type = E820_RESERVED;
 
-        dprintf(1, " from CB start:%016llx size:%016llx type:%08x\n", m->start, m->size, type);
+        dprintf(3, " from CB start:%016llx size:%016llx type:%08x\n", m->start, m->size, type);
         e820_add(m->start, m->size, type);
     }
 
@@ -304,10 +304,10 @@ coreboot_platform_setup(void)
     // Scan CB_MEM_TABLE areas for bios tables.
     int i, count = MEM_RANGE_COUNT(cbm);
     for (i=0; i<count; i++) {
-dprintf(1, " [%d]\n", i);
+dprintf(3, " [%d]\n", i);
         struct cb_memory_range *m = &cbm->map[i];
         if (m->type == CB_MEM_TABLE) {
-dprintf(1, "  is cb mem table\n");
+dprintf(3, "  is cb mem table\n");
             scan_tables(m->start, m->size);
           }
     }

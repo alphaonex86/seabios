@@ -446,6 +446,8 @@ ps2_check_event(void)
  * Setup
  ****************************************************************/
 
+int PS2KeyboardOK;
+
 static void
 ps2_keyboard_setup(void *data)
 {
@@ -524,6 +526,7 @@ ps2_keyboard_setup(void *data)
         return;
 
     dprintf(1, "PS2 keyboard initialized\n");
+    PS2KeyboardOK = 1;
 }
 
 void
