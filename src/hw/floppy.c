@@ -420,6 +420,16 @@ floppy_drive_recal(u8 floppyid)
     return DISK_RET_SUCCESS;
 }
 
+// POST check of a drive set up in CMOS: recalibrate it; -1 if it did not reach track 0.
+int
+floppy_drive_check(u8 floppyid)
+{
+    u8 param[2] = { floppyid };
+    int ret = floppy_drive_pio(floppyid, FC_RECALIBRATE, param);
+    floppy_dor_write(FLOPPY_DOR_IRQ | FLOPPY_DOR_RESET);   // motor off
+    return ret || (param[0] & 0xd0) ? -1 : 0;   // ST0: abnormal end or equipment check
+}
+
 static int
 floppy_drive_specify(void)
 {

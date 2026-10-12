@@ -106,7 +106,7 @@ bda_init(void)
 
     // Init extra stack
     StackPos = &ExtraStack[BUILD_EXTRA_STACK_SIZE] - SYMBOL(zonelow_base);
-    dprintf(1, "stackpos %p %p %x\n", StackPos, ExtraStack, SYMBOL(zonelow_base));
+    dprintf(3, "stackpos %p %p %x\n", StackPos, ExtraStack, SYMBOL(zonelow_base));
 }
 
 void
@@ -242,6 +242,7 @@ maininit(void)
         post_code(POST_MEMTEST);
         setup_memtest();
         post_code(POST_OPTIONROMS);
+        setup_isapnp();
     }
 
     // Run option roms

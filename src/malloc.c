@@ -70,7 +70,7 @@ alloc_new(struct zone_s *zone, u32 size, u32 align, struct allocinfo_s *fill)
         }
     }
 
-    dprintf(1, "AA4\n");
+    dprintf(3, "AA4\n");
 
     return 0;
 }
@@ -260,7 +260,7 @@ malloc_palloc(struct zone_s *zone, u32 size, u32 align)
 {
     ASSERT32FLAT();
     if (!size) {
-    dprintf(1, "AA0\n");
+    dprintf(3, "AA0\n");
         return 0;
         }
 
@@ -283,7 +283,7 @@ malloc_palloc(struct zone_s *zone, u32 size, u32 align)
         return 0;
     }
 
-    dprintf(1, "phys_alloc zone=%p size=%d align=%x ret=%x (detail=%p)\n"
+    dprintf(3, "phys_alloc zone=%p size=%d align=%x ret=%x (detail=%p)\n"
             , zone, size, align, data, detail);
 
     return data;
@@ -437,7 +437,7 @@ rom_confirm(u32 size)
         return -1;
     }
 
-    dprintf(1, "romend:%x size:%x ALIGN:%x RES:%x\n",
+    dprintf(3, "romend:%x size:%x ALIGN:%x RES:%x\n",
 	    RomEnd,
 	    size,
 	    OPTION_ROM_ALIGN,
@@ -457,7 +457,7 @@ void
 malloc_preinit(void)
 {
     ASSERT32FLAT();
-    dprintf(1, "malloc preinit !!! does e820_remove on segA-segE\n");
+    dprintf(3, "malloc preinit !!! does e820_remove on segA-segE\n");
 
     // Don't declare any memory between 0xa0000 and 0x100000
     e820_remove(BUILD_LOWRAM_END, BUILD_BIOS_ADDR-BUILD_LOWRAM_END);
@@ -471,7 +471,7 @@ malloc_preinit(void)
     int i;
     for (i=e820_count-1; i>=0; i--) {
         struct e820entry *en = &e820_list[i];
-        dprintf(1, "  start:%016llx size:%016llx type:%s\n", en->start, en->size, e820_type_name(en->type));
+        dprintf(3, "  start:%016llx size:%016llx type:%s\n", en->start, en->size, e820_type_name(en->type));
 
         u64 end = en->start + en->size;
         if (end < 1024*1024)
@@ -493,23 +493,23 @@ malloc_preinit(void)
         alloc_add(&ZoneTmpHigh, s, e);
     }
 
-    dprintf(1, "A3\n");
+    dprintf(3, "A3\n");
 
     // Populate regions
     // Conventional RAM only (BUILD_EBDA_MINIMUM is E0000 in this port): C8000-DFFFF goes back to the
     // ISA bus after the option ROMs.
     alloc_add(&ZoneTmpLow, BUILD_STACK_ADDR, 0x90000);
-    dprintf(1, "A4\n");
+    dprintf(3, "A4\n");
     if (highram_start) {
 
-    dprintf(1, "A5 start:%08x size:%08x\n", highram_start, highram_size);
+    dprintf(3, "A5 start:%08x size:%08x\n", highram_start, highram_size);
 
         alloc_add(&ZoneHigh, highram_start, highram_start + highram_size);
-    dprintf(1, "A6\n");
+    dprintf(3, "A6\n");
         e820_add(highram_start, highram_size, E820_RESERVED);
-    dprintf(1, "A7\n");
+    dprintf(3, "A7\n");
     }
-    dprintf(1, "A8\n");
+    dprintf(3, "A8\n");
 }
 
 void
@@ -538,7 +538,7 @@ calcRamSize(void)
     for (i=e820_count-1; i>=0; i--) {
         struct e820entry *en = &e820_list[i];
 
-	    dprintf(1, "  start:%016llx size:%016llx type:%s\n", en->start, en->size, e820_type_name(en->type));
+	    dprintf(3, "  start:%016llx size:%016llx type:%s\n", en->start, en->size, e820_type_name(en->type));
 
         u64 end = en->start + en->size;
         u32 type = en->type;
@@ -614,7 +614,7 @@ malloc_prepboot(void)
         e820_add(endlow, BUILD_LOWRAM_END-endlow, E820_RESERVED);
 
 
-	dprintf(1, "xyz %x %x\n", BUILD_LOWRAM_END, endlow);
+	dprintf(3, "xyz %x %x\n", BUILD_LOWRAM_END, endlow);
 
     // Clear unused f-seg ram.
     struct allocinfo_s *info = alloc_find_lowest(&ZoneFSeg);
@@ -635,24 +635,24 @@ malloc_prepboot(void)
 //http://www.uruk.org/orig-grub/mem64mb.html
 
 //pc2005 reserve videobios?
-dprintf(1, "add vbios\n");
+dprintf(3, "add vbios\n");
 e820_add(0xc0000, 0x10000, E820_RESERVED);
 
-dprintf(1, "add dseg\n");
+dprintf(3, "add dseg\n");
 e820_add(0xd0000, 0x10000, E820_RESERVED);
 
-dprintf(1, "add vram\n");
+dprintf(3, "add vram\n");
 e820_add(0xa0000, 0x20000, E820_RESERVED);
 
 #endif
 
 #if 0
-dprintf(1, "add zero area\n");
+dprintf(3, "add zero area\n");
 e820_add(0x0, 0x1000, E820_RESERVED);
 #endif
 
 
-dprintf(1, "add eseg\n");
+dprintf(3, "add eseg\n");
 e820_add(0xe0000, 0x10000, E820_RESERVED);
 
     calcRamSize();
