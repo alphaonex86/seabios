@@ -21,6 +21,7 @@ struct atadrive_s {
     struct ata_channel_s *chan_gf;
     u8 slave;
     u8 chs_only;
+    u8 multiple;    // sectors per DRQ block (IDE HDD Block Mode), 0: off
 };
 
 // ata.c

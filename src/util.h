@@ -61,6 +61,7 @@ extern int SetupRequested;
 extern u8 SetupL1Off;
 u16 setup_init(void);
 void setup_post_warnings(void);
+void setup_isapnp(void);
 void setup_menu(void);
 u32 setup_boot_delay(void);
 void setup_boot_password(void);
@@ -70,11 +71,15 @@ void setup_post_summary(void);
 void setup_finish(void);
 int setup_isa_shadow(u32 addr);
 int setup_option(int index);
+int setup_ide_type(int idx);
+struct chs_s;
+void setup_ide_geometry(int idx, struct chs_s *lchs);
 int setup_ide_index(int pci_bdf, int ataid, int slave);
 u8 setup_ide_pio(int idx, u16 *identify);
 void setup_ide_timing(int idx, u8 mode);
 struct drive_s;
-void setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pio);
+void setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pio, u8 multiple);
+void setup_ide_detect(int idx, int done);
 int setup_ide_translation(struct drive_s *drive);
 
 // bootsplash.c
@@ -200,6 +205,7 @@ void dma_setup(void);
 // hw/floppy.c
 extern struct floppy_ext_dbt_s diskette_param_table2;
 void floppy_setup(void);
+int floppy_drive_check(u8 floppyid);
 struct drive_s *init_floppy(int floppyid, int ftype);
 int find_floppy_type(u32 size);
 int floppy_process_op(struct disk_op_s *op);
@@ -297,7 +303,7 @@ void serial_setup(void);
 void lpt_setup(void);
 
 // version.c
-extern const char VERSION[], BUILDINFO[];
+extern const char VERSION[], BUILDINFO[], RELEASE_DATE[];
 
 // vgahooks.c
 void handle_155f(struct bregs *regs);

@@ -147,7 +147,7 @@ make_bios_readonly_finali(void)
 	//TODO WT-only 486
 	wbinvd();
 
-	dprintf(1, "locking shadow ram on FinALI\n");
+	dprintf(3, "locking shadow ram on FinALI\n");
 
 	//unlock chipset
 	outb(0x03, PORT_INDEX);
@@ -168,7 +168,7 @@ make_bios_readonly_finali(void)
 static void
 make_bios_writable_umc(void)
 {
-	dprintf(1, "UMC: shadow ram unprotect\n");
+	dprintf(3, "UMC: shadow ram unprotect\n");
 
 	const u16 bdf = pci_to_bdf(0, 0x10, 0);
 
@@ -204,7 +204,7 @@ umc_isa_writes(int isa)
 static void
 make_bios_readonly_umc(void)
 {
-	dprintf(1, "UMC: shadow ram protect\n");
+	dprintf(3, "UMC: shadow ram protect\n");
 
 	// return;	//TODO
 
@@ -264,12 +264,12 @@ make_bios_readonly(void)
 {
     //pc2005
     //TODO hack for finali or UMC
-    dprintf(1, "make_bios_readonly\n");
+    dprintf(3, "make_bios_readonly\n");
 
     //stack and RW variables in upper memory, needs to be writeable
     // if (CONFIG_WRITABLE_UPPERMEMORY)
     if (! CONFIG_MALLOC_UPPERMEMORY) {
-        dprintf(1, "TODO UMC\n");
+        dprintf(3, "TODO UMC\n");
         make_bios_readonly_umc();
     }
 

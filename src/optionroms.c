@@ -80,7 +80,7 @@ call_bcv(u16 seg, u16 ip)
 static int
 is_valid_rom(struct rom_header *rom)
 {
-    dprintf(1, "Checking rom %p (sig %x size %d B)\n"
+    dprintf(3, "Checking rom %p (sig %x size %d B)\n"
             , rom, rom->signature, rom->size * 512);
     if (rom->signature != OPTION_ROM_SIGNATURE)
         return 0;
@@ -136,7 +136,7 @@ get_pci_rom(struct rom_header *rom)
 static int
 init_optionrom(struct rom_header *rom, u16 bdf, int isvga)
 {
-    dprintf(1, "init_optionrom %p\n", rom);
+    dprintf(3, "init_optionrom %p\n", rom);
 
     if (! is_valid_rom(rom)) {
         dprintf(1, "NOT VALID ROM?\n");
@@ -145,7 +145,7 @@ init_optionrom(struct rom_header *rom, u16 bdf, int isvga)
 
     u8 romblocks = rom->size;
 
-dprintf(1, "ROM size %u*512 B\n", romblocks);
+dprintf(3, "ROM size %u*512 B\n", romblocks);
 
     struct rom_header *newrom = rom_reserve(romblocks * 512);
     if (!newrom) {
@@ -153,20 +153,20 @@ dprintf(1, "ROM size %u*512 B\n", romblocks);
         return -1;
     }
 
-    dprintf(1, "ROM memmove test %p %p\n", newrom, rom);
+    dprintf(3, "ROM memmove test %p %p\n", newrom, rom);
 
     if (newrom != rom) {
         memmove(newrom, rom, romblocks * 512);
     }
 
-dprintf(1, "newROM size %u*512 B\n", newrom->size);
+dprintf(3, "newROM size %u*512 B\n", newrom->size);
 
     tpm_option_rom(newrom, romblocks * 512);
 
     // dprintf(1, "IO4\n");
 
     if (isvga || get_pnp_rom(newrom)) {
-        dprintf(1, "IO5 !!! callrom (VGA or PNP)\n");
+        dprintf(3, "IO5 !!! callrom (VGA or PNP)\n");
 
 wbinvd();
 
@@ -174,7 +174,7 @@ wbinvd();
         callrom(newrom, bdf);
     }
 
-    dprintf(1, "ROM size after callrom %u*512 B\n", newrom->size);
+    dprintf(3, "ROM size after callrom %u*512 B\n", newrom->size);
 
     //NOTICE should use which original rom size was copied
     //NOTICE adaptec scsi change its own size of shadow copy
@@ -285,7 +285,7 @@ copy_rom(struct rom_header *rom)
         warn_noalloc();
         return NULL;
     }
-    dprintf(1, "Copying option rom (size %d) from %p to %p\n"
+    dprintf(3, "Copying option rom (size %d) from %p to %p\n"
             , romsize, rom, newrom);
 
     iomemcpy(newrom, rom, romsize);
@@ -297,10 +297,10 @@ copy_rom(struct rom_header *rom)
 static struct rom_header *
 map_pcirom(struct pci_device *pci)
 {
-    dprintf(1, "Attempting to map option rom on dev %pP\n", pci);
+    dprintf(3, "Attempting to map option rom on dev %pP\n", pci);
 
     if ((pci->header_type & 0x7f) != PCI_HEADER_TYPE_NORMAL) {
-        dprintf(1, "Skipping non-normal pci device (type=%x)\n"
+        dprintf(3, "Skipping non-normal pci device (type=%x)\n"
                 , pci->header_type);
         return NULL;
     }
@@ -310,7 +310,7 @@ map_pcirom(struct pci_device *pci)
     pci_config_writel(bdf, PCI_ROM_ADDRESS, ~PCI_ROM_ADDRESS_ENABLE);
     u32 sz = pci_config_readl(bdf, PCI_ROM_ADDRESS);
 
-    dprintf(1, "Option rom sizing returned %x %x\n", orig, sz);
+    dprintf(3, "Option rom sizing returned %x %x\n", orig, sz);
     orig &= ~PCI_ROM_ADDRESS_ENABLE;
     if (!sz || sz == 0xffffffff)
         goto fail;
@@ -321,7 +321,7 @@ map_pcirom(struct pci_device *pci)
     if ((orig == sz) || ((u32) orig < 4*1024*1024)) {
         // Don't try to map to a pci addresses at its max, in the last
         // 4MiB of ram, or the first 16MiB of ram.
-        dprintf(1, "Preset rom address doesn't look valid\n");
+        dprintf(3, "Preset rom address doesn't look valid\n");
         goto fail;
     }
 
@@ -330,16 +330,16 @@ map_pcirom(struct pci_device *pci)
 
     struct rom_header *rom = (void*)orig;
     for (;;) {
-        dprintf(1, "Inspecting possible rom at %p (vd=%04x:%04x bdf=%pP)\n"
+        dprintf(3, "Inspecting possible rom at %p (vd=%04x:%04x bdf=%pP)\n"
                 , rom, pci->vendor, pci->device, pci);
         if (rom->signature != OPTION_ROM_SIGNATURE) {
-            dprintf(1, "No option rom signature (got %x)\n", rom->signature);
+            dprintf(3, "No option rom signature (got %x)\n", rom->signature);
         //ignore signature
             // goto fail;
         }
         struct pci_data *pd = get_pci_rom(rom);
         if (! pd) {
-            dprintf(1, "No valid pci signature found\n");
+            dprintf(3, "No valid pci signature found\n");
         //ignore signature
             // goto fail;
         }
@@ -348,10 +348,10 @@ map_pcirom(struct pci_device *pci)
             && pd->type == PCIROM_CODETYPE_X86)
             // A match
             break;
-        dprintf(1, "Didn't match dev/ven (got %04x:%04x) or type (got %d)\n"
+        dprintf(3, "Didn't match dev/ven (got %04x:%04x) or type (got %d)\n"
                 , pd->vendor, pd->device, pd->type);
         if (pd->indicator & 0x80) {
-            dprintf(1, "No more images left\n");
+            dprintf(3, "No more images left\n");
             goto fail;
         }
         rom = (void*)((u32)rom + pd->ilen * 512);
@@ -379,11 +379,28 @@ static void boot_irq_restore(void)
     SET_IVT(0x19, seabios);
 }
 
+// Built-in boot ROM for the first card without one whose vendor:device is in "etc/pxe-pci-ids" (u32
+// device << 16 | vendor each): "pxe.rom", deployed once since it tries every supported card in turn.
+static struct romfile_s *
+pxe_romfile(struct pci_device *pci)
+{
+    static int deployed;
+    int size, i, found = 0;
+    u32 *ids = deployed ? NULL : romfile_loadfile("etc/pxe-pci-ids", &size);
+    if (!ids)
+        return NULL;
+    for (i = 0; i < size / 4; i++)
+        found |= ids[i] == (pci->device << 16 | pci->vendor);
+    free(ids);
+    deployed = found;
+    return found ? romfile_find("pxe.rom") : NULL;
+}
+
 // Attempt to map and initialize the option rom on a given PCI device.
 static void
 init_pcirom(struct pci_device *pci, int isvga, u64 *sources)
 {
-    dprintf(1, "Attempting to init PCI bdf %pP (vd %04x:%04x)\n"
+    dprintf(3, "Attempting to init PCI bdf %pP (vd %04x:%04x)\n"
             , pci, pci->vendor, pci->device);
 
     char fname[17];
@@ -393,14 +410,16 @@ init_pcirom(struct pci_device *pci, int isvga, u64 *sources)
     struct rom_header *rom = NULL;
     if (file) {
         rom = deploy_romfile(file);
-dprintf(1, "PCIROM1 %p\n", rom);
+dprintf(3, "PCIROM1 %p\n", rom);
         }
     else if (RunPCIroms > 1 || (RunPCIroms == 1 && isvga)) {
         rom = map_pcirom(pci);
-dprintf(1, "PCIROM2 %p\n", rom);
+dprintf(3, "PCIROM2 %p\n", rom);
         }
+    if (!rom && !isvga && (file = pxe_romfile(pci)))
+        rom = deploy_romfile(file);
     if (! rom) {
-dprintf(1, "PCI NO ROM\n");
+dprintf(3, "PCI NO ROM\n");
         // No ROM present.
         return;
         }
@@ -408,7 +427,7 @@ dprintf(1, "PCI NO ROM\n");
     struct pnp_data *pnp = get_pnp_rom(rom);
     setRomSource(sources, rom, RS_PCIROM | (u32)pci);
 
-dprintf(1, "PCI bef init\n");
+dprintf(3, "PCI bef init\n");
     init_optionrom(rom, pci->bdf, isvga);
     if (boot_irq_captured() && !irq_was_captured &&
         !file && !isvga && pnp) {
@@ -482,7 +501,7 @@ optionrom_setup(void)
     u64 sources[(BUILD_BIOS_ADDR - BUILD_ROM_START) / OPTION_ROM_ALIGN];
     memset(sources, 0, sizeof(sources));
 
-dprintf(1, "==== rest of option ROMs @%x\n", post_vga);
+dprintf(3, "==== rest of option ROMs @%x\n", post_vga);
 
     // Find and deploy PCI roms.
     struct pci_device *pci;
@@ -499,7 +518,7 @@ dprintf(1, "==== rest of option ROMs @%x\n", post_vga);
 
     // All option roms found and deployed - now build BEV/BCV vectors.
 
-dprintf(1, "rom end2 %x\n", rom_get_last());
+dprintf(3, "rom end2 %x\n", rom_get_last());
 
     u32 pos = post_vga;
 
@@ -510,7 +529,7 @@ dprintf(1, "rom end2 %x\n", rom_get_last());
     while (pos < rom_get_last()) {
     // while (pos < 0xe0000) {	//pc2005
 
-dprintf(1, "rom end3 %x, pos %x\n", rom_get_last(), pos);
+dprintf(3, "rom end3 %x, pos %x\n", rom_get_last(), pos);
 
         struct rom_header *rom = (void*)pos;
         if (! is_valid_rom(rom)) {
@@ -521,7 +540,7 @@ dprintf(1, "rom end3 %x, pos %x\n", rom_get_last(), pos);
 
 // pos += ALIGN(pos, 0x10000);
 
-dprintf(1, "pre pnp\n");
+dprintf(3, "pre pnp\n");
 
         struct pnp_data *pnp = get_pnp_rom(rom);
         if (! pnp) {
@@ -531,7 +550,7 @@ dprintf(1, "pre pnp\n");
             continue;
         }
 
-dprintf(1, "post pnp\n");
+dprintf(3, "post pnp\n");
 
         // PnP rom - check for BEV and BCV boot capabilities.
         int instance = 0;
@@ -566,7 +585,7 @@ static int try_setup_display_other(void)
 {
     struct pci_device *pci;
 
-    dprintf(1, "No VGA found, scan for other PCI display\n");
+    dprintf(3, "No VGA found, scan for other PCI display\n");
 
     foreachpci(pci) {
         if (!is_other_display(pci))
@@ -623,7 +642,7 @@ vgarom_setup(void)
             continue;
         }
 
-        dprintf(1, " found PCI VGA\n");
+        dprintf(3, " found PCI VGA\n");
         vgahook_setup(pci);
         init_pcirom(pci, 1, NULL);
         have_vga = 1;
@@ -650,7 +669,7 @@ vgarom_setup(void)
     }
 
     if (!have_vga) {
-        dprintf(1, " check ISA VGA\n");
+        dprintf(3, " check ISA VGA\n");
 
 #if 1   //UMC
         //set from RAM shadow to ROM
