@@ -48,6 +48,35 @@ int boot_lchs_find_scsi_device(struct pci_device *pci, int target, int lun,
 int boot_lchs_find_ata_device(struct pci_device *pci, int chanid, int slave,
                               struct chs_s *chs);
 
+// apm.c
+extern u8 ApmEnabled;
+
+// setup.c
+// newBIOS POST codes on port 80h for a POST card, in POST order (newBIOS/POSTCODES.md).
+enum { POST_SEABIOS = 0xb0, POST_PLATFORM, POST_VGA, POST_BANNER, POST_DEVICES, POST_MEMTEST,
+       POST_OPTIONROMS, POST_SUMMARY, POST_PROMPT, POST_SETUP, POST_SETUP_MEMTEST, POST_PREPBOOT,
+       POST_BOOT, POST_NO_BOOT };
+void post_code(u8 code);
+extern int SetupRequested;
+extern u8 SetupL1Off;
+u16 setup_init(void);
+void setup_post_warnings(void);
+void setup_menu(void);
+u32 setup_boot_delay(void);
+void setup_boot_password(void);
+void setup_post_banner(void);
+void setup_memtest(void);
+void setup_post_summary(void);
+void setup_finish(void);
+int setup_isa_shadow(u32 addr);
+int setup_option(int index);
+int setup_ide_index(int pci_bdf, int ataid, int slave);
+u8 setup_ide_pio(int idx, u16 *identify);
+void setup_ide_timing(int idx, u8 mode);
+struct drive_s;
+void setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pio);
+int setup_ide_translation(struct drive_s *drive);
+
 // bootsplash.c
 void enable_vga_console(void);
 void enable_bootsplash(void);
@@ -147,6 +176,8 @@ void pirtable_setup(void);
 void make_bios_writable(void);
 void make_bios_readonly(void);
 void qemu_reboot(void);
+void umc_isa_block(u32 addr, int isa);
+void umc_isa_writes(int isa);
 
 // fw/smbios.c
 void smbios_legacy_setup(void);
@@ -186,6 +217,8 @@ void sdcard_setup(void);
 void timer_setup(void);
 void pmtimer_setup(u16 ioport);
 void tsctimer_setfreq(u32 khz, const char *src);
+extern u32 TimerKHz;
+u32 timer_read(void);
 u32 timer_calc(u32 msecs);
 u32 timer_calc_usec(u32 usecs);
 int timer_check(u32 end);

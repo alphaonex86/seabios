@@ -94,17 +94,16 @@ bda_init(void)
 
     SET_BDA(ebda_seg, ebda_seg);
 
-//pc2005
-//    SET_BDA(mem_size_kb, ebda_seg / (1024/16));
-    SET_BDA(mem_size_kb, 0xa000 / (1024/16));
+//pc2005: EBDA in the E segment keeps 640 KiB free but needs writable shadow RAM at runtime
+    SET_BDA(mem_size_kb, CONFIG_MALLOC_UPPERMEMORY ? 640 : ebda_seg / (1024/16));
 
     // Init ebda
     struct extended_bios_data_area_s *ebda = get_ebda_ptr();
     memset(ebda, 0, sizeof(*ebda));
     ebda->size = esize;
 
-//    e820_add((u32)ebda, BUILD_LOWRAM_END-(u32)ebda, E820_RESERVED);
-    e820_add((u32)ebda, 0xf0000-(u32)ebda, E820_RESERVED);
+    e820_add((u32)ebda, (CONFIG_MALLOC_UPPERMEMORY ? 0xf0000 : BUILD_LOWRAM_END) - (u32)ebda
+             , E820_RESERVED);
 
     // Init extra stack
     StackPos = &ExtraStack[BUILD_EXTRA_STACK_SIZE] - SYMBOL(zonelow_base);
@@ -232,6 +231,8 @@ struct int_vec {
 static void
 maininit(void)
 {
+    if (CONFIG_SETUP_MENU)
+        post_code(POST_PLATFORM);
     // Initialize internal interfaces.
     interface_init();
 
@@ -243,22 +244,43 @@ maininit(void)
         device_hardware_setup();
 
     // Run vga option rom
+    if (CONFIG_SETUP_MENU)
+        post_code(POST_VGA);
     vgarom_setup();
     sercon_setup();
     enable_vga_console();
+    if (CONFIG_SETUP_MENU) {
+        post_code(POST_BANNER);
+        setup_post_banner();
+        post_code(POST_DEVICES);
+    }
 
     // Do hardware initialization (if running synchronously)
     if (!threads_during_optionroms()) {
         device_hardware_setup();
         wait_threads();
     }
+    if (CONFIG_SETUP_MENU) {
+        post_code(POST_MEMTEST);
+        setup_memtest();
+        post_code(POST_OPTIONROMS);
+    }
 
     // Run option roms
     optionrom_setup();
+    if (CONFIG_SETUP_MENU) {
+        post_code(POST_SUMMARY);
+        setup_post_summary();
+        post_code(POST_PROMPT);
+    }
 
     // Allow user to modify overall boot order.
     interactive_bootmenu();
     wait_threads();
+    if (CONFIG_SETUP_MENU) {
+        post_code(POST_PREPBOOT);
+        setup_finish();
+    }
 
     // Prepare for boot.
     prepareboot();
@@ -342,6 +364,8 @@ void VISIBLE32INIT
 dopost(void)
 {
     code_mutable_preinit();
+    if (CONFIG_SETUP_MENU)
+        post_code(POST_SEABIOS);
 
     // Detect ram and setup internal malloc.
     qemu_preinit();

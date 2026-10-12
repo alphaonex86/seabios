@@ -59,6 +59,13 @@ endchoice
         default y
         help
             Support an interactive boot menu at end of post.
+    config SETUP_MENU
+        depends on BOOTMENU && COREBOOT
+        bool "CMOS setup menu (DEL)"
+        default n
+        help
+            Award-style setup screen entered with DEL during POST: date/time,
+            floppy drive types and boot sequence, stored in the AT CMOS checksum area.
     config BOOTSPLASH
         depends on BOOTMENU
         bool "Graphical boot splash screen"

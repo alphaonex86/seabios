@@ -22,6 +22,9 @@
 #include "string.h" // memset
 #include "util.h" // timer_calc
 #include "x86.h" // inb
+#include "newbios_cmos.h" // NB_IDE_32BIT
+
+u8 AtaPio32 VARFSEG = 1;
 
 #define IDE_TIMEOUT 32000 //32 seconds max for IDE ops
 
@@ -290,14 +293,14 @@ ata_pio_transfer(struct disk_op_s *op, int iswrite, int blocksize)
         if (iswrite) {
             // Write data to controller
             dprintf(12, "Write sector id=%p dest=%p\n", op->drive_fl, buf_fl);
-            if (CONFIG_ATA_PIO32)
+            if (CONFIG_ATA_PIO32 && GET_GLOBAL(AtaPio32))
                 outsl_fl(iobase1, buf_fl, blocksize / 4);
             else
                 outsw_fl(iobase1, buf_fl, blocksize / 2);
         } else {
             // Read data from controller
             dprintf(12, "Read sector id=%p dest=%p\n", op->drive_fl, buf_fl);
-            if (CONFIG_ATA_PIO32)
+            if (CONFIG_ATA_PIO32 && GET_GLOBAL(AtaPio32))
                 insl_fl(iobase1, buf_fl, blocksize / 4);
             else
                 insw_fl(iobase1, buf_fl, blocksize / 2);
@@ -557,6 +560,18 @@ ata_readwrite(struct disk_op_s *op, int iswrite)
     cmd.lba_high = lba >> 16;
     cmd.device = ((lba >> 24) & 0xf) | ATA_CB_DH_LBA;
 
+    struct atadrive_s *adrive_gf = container_of(op->drive_fl, struct atadrive_s, drive);
+    if (GET_GLOBALFLAT(adrive_gf->chs_only)) {
+        // Pre-LBA drive: address it by its default geometry (IDENTIFY words 1, 3, 6).
+        u32 spt = GET_GLOBALFLAT(adrive_gf->drive.pchs.sector);
+        u32 heads = GET_GLOBALFLAT(adrive_gf->drive.pchs.head);
+        u32 cylinder = (u32)lba / (spt * heads), rest = (u32)lba % (spt * heads);
+        cmd.lba_low = rest % spt + 1;
+        cmd.lba_mid = cylinder;
+        cmd.lba_high = cylinder >> 8;
+        cmd.device = rest / spt;
+    }
+
     int ret;
     if (usepio)
         ret = ata_pio_cmd_data(op, iswrite, &cmd);
@@ -740,6 +755,39 @@ init_atadrive(struct atadrive_s *dummy, u16 *buffer)
     return adrive;
 }
 
+// Drive index (0-3) in the setup utility for the onboard controller, or -1.
+static int
+ata_setup_index(struct atadrive_s *dummy)
+{
+    if (!CONFIG_SETUP_MENU)
+        return -1;
+    return setup_ide_index(dummy->chan_gf->pci_bdf, dummy->chan_gf->ataid, dummy->slave);
+}
+
+// Setup options of an onboard drive: transfer mode (drive and chipset), standby timer.
+static void
+ata_setup_drive(struct atadrive_s *adrive, u16 *buffer, int idx, int atapi)
+{
+    if (idx < 0)
+        return;
+    u8 mode = setup_ide_pio(idx, buffer);
+    struct ata_pio_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.feature = 0x03;                     // set transfer mode
+    cmd.sector_count = 0x08 | mode;         // PIO flow control mode; ATA-1 drives may abort
+    cmd.command = ATA_CMD_SET_FEATURES;
+    ata_cmd_nondata(adrive, &cmd);
+    setup_ide_timing(idx, mode);
+    int minutes = setup_option(NB_HDD_STANDBY);
+    if (minutes && !atapi) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.sector_count = minutes * 12;    // units of 5 s
+        cmd.command = ATA_CMD_IDLE;
+        ata_cmd_nondata(adrive, &cmd);
+    }
+    setup_ide_report(idx, &adrive->drive, buffer, atapi, mode);
+}
+
 // Detect if the given drive is an atapi - initialize it if so.
 static struct atadrive_s *
 init_drive_atapi(struct atadrive_s *dummy, u16 *buffer)
@@ -749,6 +797,9 @@ init_drive_atapi(struct atadrive_s *dummy, u16 *buffer)
 dprintf(1, "BB1 %d\n", ret);
     if (ret)
         return NULL;
+    int idx = ata_setup_index(dummy);
+    if (idx >= 0 && setup_option(NB_IDE_TYPE0 + idx))
+        return NULL;   // "None" in setup
 
 
     // Success - setup as ATAPI.
@@ -784,6 +835,7 @@ dprintf(1, "BB3\n");
     }
 
 dprintf(1, "BB4\n");
+    ata_setup_drive(adrive, buffer, idx, 1);
 
     return adrive;
 }
@@ -796,6 +848,9 @@ init_drive_ata(struct atadrive_s *dummy, u16 *buffer)
     int ret = send_ata_identity(dummy, buffer, ATA_CMD_IDENTIFY_DEVICE);
     if (ret)
         return NULL;
+    int idx = ata_setup_index(dummy);
+    if (idx >= 0 && setup_option(NB_IDE_TYPE0 + idx))
+        return NULL;   // "None" in setup
 
     // Success - setup as ATA.
     struct atadrive_s *adrive = init_atadrive(dummy, buffer);
@@ -811,8 +866,11 @@ init_drive_ata(struct atadrive_s *dummy, u16 *buffer)
     u64 sectors;
     if (buffer[83] & (1 << 10)) // word 83 - lba48 support
         sectors = *(u64*)&buffer[100]; // word 100-103
-    else
+    else if (buffer[49] & (1 << 9)) // word 49 - lba support
         sectors = *(u32*)&buffer[60]; // word 60 and word 61
+    else
+        sectors = (u32)buffer[1] * buffer[3] * buffer[6];
+    adrive->chs_only = !(buffer[49] & (1 << 9));
     adrive->drive.sectors = sectors;
     u64 adjsize = sectors >> 11;
     char adjprefix = 'M';
@@ -838,6 +896,7 @@ init_drive_ata(struct atadrive_s *dummy, u16 *buffer)
                               &(adrive->drive.lchs));
     // Register with bcv system.
     boot_add_hd(&adrive->drive, desc, prio);
+    ata_setup_drive(adrive, buffer, idx, 0);
 
     return adrive;
 }
@@ -1102,6 +1161,8 @@ ata_setup(void)
     dprintf(1, "init hard drives\n");
 
     SpinupEnd = timer_calc(IDE_TIMEOUT);
+    if (CONFIG_SETUP_MENU)
+        AtaPio32 = setup_option(NB_IDE_32BIT);
     ata_scan();
 
     SET_BDA(disk_control_byte, 0xc0);
