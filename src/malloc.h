@@ -9,6 +9,7 @@ u32 rom_get_max(void);
 u32 rom_get_last(void);
 
 void rom_set_last(u32 newend);	//pc2005
+int malloc_tmphigh_free(int n, u32 *start, u32 *end);
 
 struct rom_header *rom_reserve(u32 size);
 int rom_confirm(u32 size);

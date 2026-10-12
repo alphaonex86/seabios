@@ -167,7 +167,7 @@ timer_adjust_bits(u32 value, u32 validbits)
 }
 
 // Sample the current timer value.
-static u32
+u32
 timer_read(void)
 {
     u16 port = GET_GLOBAL(TimerPort);

@@ -20,6 +20,7 @@
 #include "std/disk.h" // DISK_RET_SUCCESS
 #include "string.h" // memset
 #include "util.h" // timer_calc
+#include "newbios_cmos.h" // NB_SWAP_FLOPPY
 
 #define PORT_FD_BASE           0x03f0
 #define PORT_FD_DOR            0x03f2
@@ -155,11 +156,14 @@ floppy_setup(void)
         return;
     dprintf(3, "init floppy drives\n");
 
-    if (CONFIG_QEMU || 0) {        //TODO floppy disabled for now
+    if (CONFIG_QEMU || CONFIG_SETUP_MENU) {
         u8 type = rtc_read(CMOS_FLOPPY_DRIVE_TYPE);
+        int swap = CONFIG_SETUP_MENU && setup_option(NB_SWAP_FLOPPY);
+        if (swap && (type & 0x0f))
+            addFloppy(1, type & 0x0f);
         if (type & 0xf0)
             addFloppy(0, type >> 4);
-        if (type & 0x0f)
+        if (!swap && (type & 0x0f))
             addFloppy(1, type & 0x0f);
     } else {
         u8 type = romfile_loadint("etc/floppy0", 0);
