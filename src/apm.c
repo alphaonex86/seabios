@@ -14,6 +14,8 @@
 #include "util.h" // apm_shutdown
 #include "x86.h" // outb
 
+u8 ApmEnabled VARFSEG = 1;
+
 // APM installation check
 static void
 handle_155300(struct bregs *regs)
@@ -182,7 +184,7 @@ handle_1553XX(struct bregs *regs)
 void
 handle_1553(struct bregs *regs)
 {
-    if (! CONFIG_APMBIOS) {
+    if (! CONFIG_APMBIOS || !GET_GLOBAL(ApmEnabled)) {
         set_code_invalid(regs, RET_EUNSUPPORTED);
         return;
     }

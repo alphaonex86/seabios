@@ -107,6 +107,7 @@ struct drive_s {
  ****************************************************************/
 
 // block.c
+u8 get_translation(struct drive_s *drive);
 extern u8 FloppyCount, CDCount;
 extern u8 *bounce_buf_fl;
 struct drive_s *getDrive(u8 exttype, u8 extdriveoffset);

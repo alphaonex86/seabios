@@ -75,6 +75,21 @@ alloc_new(struct zone_s *zone, u32 size, u32 align, struct allocinfo_s *fill)
     return 0;
 }
 
+// Free range n of the temporary high zone (RAM nothing uses at this point of POST); 0 when no more.
+int
+malloc_tmphigh_free(int n, u32 *start, u32 *end)
+{
+    struct allocinfo_s *info;
+    hlist_for_each_entry(info, &ZoneTmpHigh.head, node) {
+        if (info->range_start + info->alloc_size < info->range_end && !n--) {
+            *start = info->range_start + info->alloc_size;
+            *end = info->range_end;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Reserve space for a 'struct allocdetail_s' and fill
 static struct allocdetail_s *
 alloc_new_detail(struct allocdetail_s *temp)
@@ -481,7 +496,9 @@ malloc_preinit(void)
     dprintf(1, "A3\n");
 
     // Populate regions
-    alloc_add(&ZoneTmpLow, BUILD_STACK_ADDR, BUILD_EBDA_MINIMUM);
+    // Conventional RAM only (BUILD_EBDA_MINIMUM is E0000 in this port): C8000-DFFFF goes back to the
+    // ISA bus after the option ROMs.
+    alloc_add(&ZoneTmpLow, BUILD_STACK_ADDR, 0x90000);
     dprintf(1, "A4\n");
     if (highram_start) {
 
@@ -593,7 +610,9 @@ malloc_prepboot(void)
 
     // Reserve more low-mem if needed.
     u32 endlow = GET_BDA(mem_size_kb)*1024;
-//    e820_add(endlow, BUILD_LOWRAM_END-endlow, E820_RESERVED);	//pc2005
+    if (!CONFIG_MALLOC_UPPERMEMORY)
+        e820_add(endlow, BUILD_LOWRAM_END-endlow, E820_RESERVED);
+
 
 	dprintf(1, "xyz %x %x\n", BUILD_LOWRAM_END, endlow);
 

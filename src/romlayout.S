@@ -5,6 +5,24 @@
 //
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 
+// All the assembly of SeaBIOS (plus the macros of entryfuncs.S). It is
+// assembled as 16-bit code (.code16, gcc -m16) and linked with the 16-bit C
+// code into the 64 KiB BIOS segment F000 (BUILD_BIOS_ADDR = 0xF0000), so
+// symbol values here are offsets inside that segment; a 32-bit flat address
+// is BUILD_BIOS_ADDR + symbol. In newBIOS, coreboot loads the SeaBIOS ELF
+// into the RAM at 0xE82C0-0xFFFFF (the shadow RAM of the BIOS area) and
+// enters entry_elf in 32-bit mode.
+// The rest of this file is the runtime glue: real-mode interrupt entry
+// points, the switches between 16-bit real mode and 32-bit protected mode,
+// and the IBM PC/AT entry points at fixed addresses.
+// SeaBIOS runs C code in three modes: 16-bit real mode (handlers called
+// through the ENTRY* macros), 32-bit flat protected mode (POST, INT 18h/19h,
+// call32()) and 32-bit segmented mode (APM/PCI BIOS for protected-mode
+// callers).
+// DECLFUNC sections that nothing references are dropped by layoutrom.py;
+// with the newBIOS configuration (out-rel) entry_smi, entry_smp, entry_csm,
+// __csm_return, entry_sercon and irqentry_arg_extrastack are not in the ROM.
+
 #include "asm-offsets.h" // BREGS_*
 #include "config.h" // CONFIG_*
 #include "entryfuncs.S" // ENTRY_*
@@ -29,12 +47,16 @@ transition32:
         cld
 
         // Disable nmi
+        // (port 70h bit 7 masks NMI; selecting CMOS register 0Fh and
+        // reading port 71h leaves the RTC in a defined state)
         movl %eax, %ecx
         movl $CMOS_RESET_CODE|NMI_DISABLE_BIT, %eax
         outb %al, $PORT_CMOS_INDEX
         inb $PORT_CMOS_DATA, %al
 
         // enable a20
+        // (port 92h bit 1, "fast A20": without A20 every odd MiB would
+        // alias the even one below it)
         inb $PORT_A20, %al
         orb $A20_ENABLE_BIT, %al
         outb %al, $PORT_A20
@@ -42,16 +64,25 @@ transition32:
 
 transition32_nmi_off:
         // Set segment descriptors
+        // IDT: pmode_IDT_info (misc.c) describes a 1-byte dummy table, so
+        // an interrupt in protected mode shuts the CPU down. GDT:
+        // rombios32_gdt (misc.c): 0x08/0x10 flat 32-bit code/data, 0x18/0x20
+        // 16-bit code (base 0xF0000)/data (base 0), 0x28/0x30 the same with
+        // 4 GiB limits ("big real mode").
         lidtw %cs:pmode_IDT_info
         lgdtw %cs:rombios32_gdt_48
 
         // Enable protected mode
+        // CR0.CD and NW are kept: the setup's "CPU Internal Cache" option
+        // (upstream SeaBIOS clears them, enabling the L1 cache each time).
         movl %cr0, %ecx
-        andl $~(CR0_PG|CR0_CD|CR0_NW), %ecx
+        andl $~CR0_PG, %ecx
         orl $CR0_PE, %ecx
         movl %ecx, %cr0
 
         // start 32bit protected mode code
+        // (far jump: loads CS = flat 32-bit code and flushes the prefetch
+        // queue; the target is given as a flat address)
         ljmpl $SEG32_MODE32_CS, $(BUILD_BIOS_ADDR + 1f)
 
         .code32
@@ -74,6 +105,10 @@ transition32_nmi_off:
         .code32
 transition16:
         // Reset data segment limits
+        // (a segment register keeps the base/limit of the last descriptor
+        // loaded in protected mode even after returning to real mode, so
+        // 64 KiB data descriptors are loaded first; transition16big loads
+        // 4 GiB ones instead, which leaves the CPU in "big real mode")
         movl $SEG32_MODE16_DS, %ecx
         movw %cx, %ds
         movw %cx, %es
@@ -82,6 +117,8 @@ transition16:
         movw %cx, %gs
 
         // Jump to 16bit mode
+        // (16-bit protected-mode code segment with base 0xF0000, so the
+        // offset 1f is the same as in real mode)
         ljmpw $SEG32_MODE16_CS, $1f
 
 transition16big:
@@ -104,6 +141,7 @@ transition16big:
         ljmpw $SEG_BIOS, $2f
 
         // restore IDT to normal real-mode defaults
+        // (the interrupt vector table at 0000:0000, 256 * 4 bytes)
 2:      lidtw %cs:rmode_IDT_info
 
         // Clear segment registers
@@ -114,6 +152,7 @@ transition16big:
         movw %cx, %ds
         movw %cx, %ss  // Assume stack is in segment 0
 
+        // (near jump within segment F000 to the offset in EDX)
         jmpl *%edx
 
 
@@ -132,6 +171,9 @@ __farcall16:
         pushl %edx
 
         // Setup for iretw call
+        // (the stack gets: return address CS:1f for the callee lretw/iretw,
+        // then an iret frame flags, CS, IP built from bregs; iretw below
+        // pops that frame, i.e. jumps to bregs->code with bregs->flags)
         movl %edx, %ds
         pushw %cs
         pushw $1f                       // return point
@@ -143,6 +185,9 @@ __farcall16:
         iretw                           // XXX - just do a lcalll
 1:
         // Store flags, es, eax
+        // (the callee returned here; reload the bregs pointer saved at
+        // entry, 0x08/0x0c above the 8 bytes just pushed, and store the
+        // returned registers and flags into it)
         pushfw
         cli
         cld
@@ -163,6 +208,9 @@ __farcall16:
         retl
 
 // IRQ trampolines
+// "int N" needs N as an immediate. These tiny far-callable functions let C
+// code raise a given software interrupt (call16_int() in stacks.h, which
+// far-calls the trampoline through __farcall16): int N, then far return.
         .macro IRQ_TRAMPOLINE num
         DECLFUNC irq_trampoline_0x\num
         irq_trampoline_0x\num :
@@ -188,6 +236,7 @@ __farcall16:
  ****************************************************************/
 
 // Entry point for QEMU smi interrupts.
+// (QEMU only: not in the newBIOS ROM, nor is entry_smp below)
         DECLFUNC entry_smi
 entry_smi:
         // Transition to 32bit mode.
@@ -222,20 +271,30 @@ entry_smp:
         .code16
 
 // Resume (and reboot) entry point - called from entry_post
+// (reached when the CPU restarts at F000:FFF0 after POST has run: a jump
+// to the reset vector, or coreboot entry16.S forwarding a CPU-only reset.
+// handle_resume() in resume.c dispatches on the CMOS shutdown code 0Fh.)
         DECLFUNC entry_resume
 entry_resume:
         // Disable interrupts
         cli
         cld
         // Use the ExtraStack in low mem.
+        // (_zonelow_seg: segment of the VARLOW data below 640 KiB; DS = SS
+        // as the 16-bit C code requires)
         movl $_zonelow_seg, %eax
         movw %ax, %ds
         movw %ax, %ss
         movl $ExtraStack + BUILD_EXTRA_STACK_SIZE, %esp
         // Call handler.
+        // (jmp, not call: handle_resume never returns)
         jmp handle_resume
 
 // PMM entry point
+// (POST Memory Manager: option ROMs far-call it during POST to allocate
+// memory. handle_pmm() is 32-bit flat C, reached through __call32 in
+// stacks.c; EDX = flat address of the caller arguments on its stack. The
+// 32-bit result is returned in DX:AX.)
         DECLFUNC entry_pmm
 entry_pmm:
         pushl %esp              // Backup %esp, then clear high bits
@@ -260,6 +319,8 @@ entry_pmm:
         lretw
 
 // PnP entry points
+// (Plug and Play BIOS, far-called by the OS in real mode or 16-bit
+// protected mode with the arguments on its stack; result in AX)
         DECLFUNC entry_pnp_real
         .global entry_pnp_prot
 entry_pnp_prot:
@@ -284,6 +345,8 @@ entry_pnp_real:
         lretw
 
 // APM entry points
+// (Advanced Power Management, protected-mode interfaces; real-mode APM
+// calls arrive as INT 15h AH=53h)
         DECLFUNC entry_apm16
 entry_apm16:
         pushfw          // save flags
@@ -296,6 +359,9 @@ entry_apm16:
         DECLFUNC entry_apm32
         .code32
 entry_apm32:
+        // (the OS built three descriptors for the APM 32-bit interface:
+        // CS = 32-bit code, CS+8 = 16-bit code, CS+16 = data; GS gets the
+        // data one so that the 32-bit segmented C code can reach it)
         pushfl
         pushl %gs
         pushl %cs               // Move second descriptor after %cs to %gs
@@ -308,6 +374,8 @@ entry_apm32:
         .code16
 
 // PCI-BIOS entry points
+// (32-bit: found by protected-mode OSes through the BIOS32 directory below;
+// 16-bit: INT 1Ah AX=B1xxh, see entry_1a_official)
         DECLFUNC entry_pcibios32
         .code32
 entry_pcibios32:
@@ -327,12 +395,18 @@ entry_pcibios16:
         iretw
 
 // int 1589 entry point
+// (INT 15h AH=89h "switch to protected mode": handle_1589 returns in
+// protected mode, so the normal interrupt path cannot be used)
         DECLFUNC entry_1589
 entry_1589:
         ENTRY_ARG handle_1589
         iretw
 
 // BIOS32 support
+// (BIOS32 Service Directory: a 32-bit OS finds its "_32_" header in the F
+// segment (misc.c) and far-calls this with EAX = service id. For "$PCI" it
+// returns EBX = base 0xF0000, ECX = length 64 KiB, EDX = offset of
+// entry_pcibios32 within that base, AL = 0; otherwise AL = 80h.)
         DECLFUNC entry_bios32
         .code32
 entry_bios32:
@@ -355,6 +429,11 @@ entry_bios32:
         .code16
 
 // 32bit elf entry point
+// This is where coreboot starts SeaBIOS: ramstage loads bios.bin.elf and
+// jumps to its ELF entry (entry_elf) in 32-bit flat protected mode with
+// the coreboot GDT. Replace coreboot IDT/GDT/segments/stack with the
+// SeaBIOS ones and continue in handle_post() (post.c, 32-bit flat C).
+// EAX/EBX are kept for multiboot (not enabled in newBIOS).
         DECLFUNC entry_elf
         .code32
 entry_elf:
@@ -375,6 +454,7 @@ entry_elf:
         .code16
 
 // UEFI Compatibility Support Module (CSM) entry point
+// (CONFIG_CSM is off: entry_csm and __csm_return are not in the ROM)
         DECLFUNC entry_csm
 entry_csm:
         // Backup register state
@@ -415,6 +495,7 @@ __csm_return:
         lretw
 
 // Serial console "hooked vga" entry point
+// (CONFIG_SERCON is off: not in the ROM)
         DECLFUNC entry_sercon
 entry_sercon:
         // Setup for chain loading to real vga handler
@@ -466,7 +547,16 @@ entry_sercon:
  * Interrupt entry points
  ****************************************************************/
 
+// Real-mode interrupt entry. The CPU arrives through the interrupt vector
+// table with FLAGS, CS, IP pushed on the stack of whatever was running.
+// Each entry_XX stub (IRQ_ENTRY macros below) pushes the address of its C
+// handler handle_XX and jumps to one of these common paths.
+
         // Main entry point for hardware interrupts handled on extra stack
+        // (an IRQ can interrupt a program with very little stack, so the
+        // registers are saved on, and C runs on, SeaBIOS own ExtraStack in
+        // low memory. StackPos is the current top of that stack. Layout
+        // there: struct bregs, then the caller ESP and SS.)
         DECLFUNC irqentry_extrastack
 irqentry_extrastack:
         cli
@@ -478,6 +568,7 @@ irqentry_extrastack:
         movl StackPos, %eax
         subl $PUSHBREGS_size+8, %eax
         SAVEBREGS_POP_DSEAX
+        // ECX := C handler address pushed by the IRQ_ENTRY stub
         popl %ecx
         movl %esp, PUSHBREGS_size(%eax)
         movw %ss, PUSHBREGS_size+4(%eax)
@@ -494,6 +585,8 @@ irqentry_extrastack:
         iretw
 
         // Main entry point for software interrupts handled on extra stack
+        // (CONFIG_ENTRY_EXTRASTACK is off: not in the ROM, software
+        // interrupts use irqentry_arg on the caller stack)
         DECLFUNC irqentry_arg_extrastack
 irqentry_arg_extrastack:
         cli
@@ -527,6 +620,8 @@ irqentry_arg_extrastack:
         iretw
 
         // Main entry point for software interrupts (using caller's stack)
+        // (handle_XX(struct bregs *) gets the caller registers and can
+        // change them, including the returned flags; see ENTRY_ARG_ST)
         DECLFUNC irqentry_arg
 irqentry_arg:
         ENTRY_ARG_ST
@@ -563,6 +658,10 @@ irqentry_arg:
         .endm
 
         // Various entry points (that don't require a fixed location).
+        // 13 = INT 13h disk services; hardware IRQs: 76 = IRQ14 (IDE),
+        // 70 = IRQ8 (RTC), 74 = IRQ12 (PS/2 mouse), 75 = IRQ13 (FPU error);
+        // hwpic1/hwpic2 = default handler for the other master/slave PIC
+        // IRQs (acknowledge, see pic.c).
         DECL_IRQ_ENTRY_ARG 13
         DECL_IRQ_ENTRY 76
         DECL_IRQ_ENTRY 70
@@ -572,6 +671,8 @@ irqentry_arg:
         DECL_IRQ_ENTRY hwpic2
 
         // int 18/19 are special - they reset stack and call into 32bit mode.
+        // (INT 19h = boot, INT 18h = boot failed / try next device; the
+        // caller state is abandoned)
         DECLFUNC entry_19
 entry_19:
         ENTRY_INTO32 _cfunc32flat_handle_19
@@ -585,23 +686,33 @@ entry_18:
  * Fixed position entry points
  ****************************************************************/
 
+// The IBM PC/AT BIOS had its entry points at fixed offsets in segment F000,
+// and old software calls or jumps there directly. Each ORG puts the code
+// at F000:addr; layoutrom.py fills the gaps with other code and data.
+
         // Specify a location in the fixed part of bios area.
         .macro ORG addr
         .section .fixedaddr.\addr
         .endm
 
+        // F000:E05B - POST entry, reached from reset_vector below. In
+        // newBIOS the first POST is entered through entry_elf instead, so
+        // here HaveRunPost is normally set (a restart after POST) and the
+        // resume/reboot path is taken.
         ORG 0xe05b
 entry_post:
         cmpl $0, %cs:HaveRunPost                // Check for resume/reboot
         jnz entry_resume
         ENTRY_INTO32 _cfunc32flat_handle_post   // Normal entry point
 
+        // F000:E2C3 - INT 02h, NMI
         ORG 0xe2c3
         .global entry_02
 entry_02:
         ENTRY handle_02  // NMI handler does not switch onto extra stack
         iretw
 
+        // F000:E3FE - INT 13h, disk
         ORG 0xe3fe
         .global entry_13_official
 entry_13_official:
@@ -609,6 +720,7 @@ entry_13_official:
 
         // 0xe401 - OldFDPT in misc.c
 
+        // F000:E6F2 - INT 19h, bootstrap loader
         ORG 0xe6f2
         .global entry_19_official
 entry_19_official:
@@ -618,26 +730,36 @@ entry_19_official:
 
         // 0xe729 - BaudTable in misc.c
 
+        // F000:E739 - INT 14h, serial port services
         ORG 0xe739
         IRQ_ENTRY_ARG 14
 
+        // F000:E82E - INT 16h, keyboard services
         ORG 0xe82e
         IRQ_ENTRY_ARG 16
 
+        // F000:E987 - INT 09h, keyboard IRQ1
         ORG 0xe987
         IRQ_ENTRY 09
 
+        // F000:EC59 - INT 40h, floppy services (INT 13h moved by a hard
+        // disk BIOS)
         ORG 0xec59
         IRQ_ENTRY_ARG 40
 
+        // F000:EF57 - INT 0Eh, floppy controller IRQ6
         ORG 0xef57
         IRQ_ENTRY 0e
 
         // 0xefc7 - diskette_param_table in misc.c
 
+        // F000:EFD2 - INT 17h, printer services
         ORG 0xefd2
         IRQ_ENTRY_ARG 17
 
+        // F000:F045 and F000:F065 - INT 10h, video: only an iret. The
+        // video BIOS of the graphics card (option ROM) installs the real
+        // INT 10h handler (newBIOS has no built-in VGA BIOS).
         ORG 0xf045
 entry_10_0x0f:
         // XXX - INT 10 Functions 0-Fh Entry Point
@@ -649,12 +771,15 @@ entry_10:
 
         // 0xf0a4 - VideoParams in misc.c
 
+        // F000:F841 - INT 12h, conventional memory size
         ORG 0xf841
         IRQ_ENTRY_ARG 12
 
+        // F000:F84D - INT 11h, equipment list
         ORG 0xf84d
         IRQ_ENTRY_ARG 11
 
+        // F000:F859 - INT 15h, system services
         ORG 0xf859
         .global entry_15_official
 entry_15_official:
@@ -664,6 +789,7 @@ entry_15_official:
 
         // 0xfa6e - vgafont8 in font.c
 
+        // F000:FE6E - INT 1Ah, time of day and PCI BIOS
         ORG 0xfe6e
         .global entry_1a_official
 entry_1a_official:
@@ -671,19 +797,27 @@ entry_1a_official:
         je entry_pcibios16      // PCIBIOS calls can be in protected mode
         IRQ_ENTRY_ARG 1a
 
+        // F000:FEA5 - INT 08h, timer IRQ0 (18.2 Hz tick)
         ORG 0xfea5
         IRQ_ENTRY 08
 
         // 0xfef3 - InitVectors in misc.c
 
+        // F000:FF53 - dummy iret used for unused vectors
         ORG 0xff53
         .global entry_iret_official
 entry_iret_official:
         iretw
 
+        // F000:FF54 - INT 05h, print screen
         ORG 0xff54
         IRQ_ENTRY_ARG 05
 
+        // F000:FFF0 = physical 0xFFFF0. In newBIOS the hardware reset
+        // vector is coreboot (0xFFFFFFF0 in flash, reset16.S); this copy
+        // in shadow RAM is reached by a jump to F000:FFF0 / FFFF:0000 (warm
+        // reboot by software) or from coreboot entry16.S after a CPU-only
+        // reset.
         ORG 0xfff0 // Power-up Entry Point
         .global reset_vector
 reset_vector:

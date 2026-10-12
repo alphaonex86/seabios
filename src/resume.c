@@ -16,6 +16,7 @@
 #include "std/bda.h" // struct bios_data_area_s
 #include "string.h" // memset
 #include "util.h" // dma_setup
+#include "x86.h" // cr0_read
 #include "tcgbios.h" // tpm_s3_resume
 #include "fw/romfile_loader.h" // romfile_fw_cfg_resume
 
@@ -27,6 +28,8 @@ handle_resume(void)
     int status = rtc_read(CMOS_RESET_CODE);
     rtc_write(CMOS_RESET_CODE, 0);
     dprintf(1, "In resume (status=%d)\n", status);
+    if (CONFIG_SETUP_MENU)      // the CPU reset set CR0.CD and NW: L1 cache as in setup
+        cr0_write((cr0_read() & ~(CR0_CD | CR0_NW)) | (GET_GLOBAL(SetupL1Off) ? CR0_CD : 0));
 
     dma_setup();
 
@@ -136,6 +139,11 @@ tryReboot(void)
 
     // Try PCI 0xcf9 reboot
     pci_reboot();
+
+    // PORT 92h reset: bit 0 resets on a 0 -> 1 transition
+    u8 port92 = inb(0x92) & ~1;
+    outb(port92, 0x92);
+    outb(port92 | 1, 0x92);
 
     // Try triple fault
     asm volatile("int3");

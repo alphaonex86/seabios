@@ -177,6 +177,30 @@ make_bios_writable_umc(void)
 	pci_config_writeb(bdf, 0x55, val);
 }
 
+// Route reads of the 16 KiB block at addr (C8000-DFFFF) to the ISA bus or to shadow RAM.
+void
+umc_isa_block(u32 addr, int isa)
+{
+	const u16 bdf = pci_to_bdf(0, 0x10, 0);
+	const u8 bit = 1 << (2 + (addr - 0xc8000) / 0x4000);
+	u8 val = pci_config_readb(bdf, 0x54);
+
+	pci_config_writeb(bdf, 0x54, isa ? (val & ~bit) : (val | bit));
+	wbinvd();
+}
+
+static void make_bios_readonly_umc(void);
+
+// Send shadow-area writes to the ISA bus (RAM on ISA ROM cards) or to shadow RAM.
+void
+umc_isa_writes(int isa)
+{
+	if (isa)
+		make_bios_readonly_umc();
+	else
+		make_bios_writable_umc();
+}
+
 static void
 make_bios_readonly_umc(void)
 {

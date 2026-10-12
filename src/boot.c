@@ -468,16 +468,21 @@ boot_init(void)
     if (! CONFIG_BOOT)
         return;
 
-    if (CONFIG_QEMU) {
-        // On emulators, get boot order from nvram.
-        if (rtc_read(CMOS_BIOS_BOOTFLAG1) & 1)
-            CheckFloppySig = 0;
-        u32 bootorder = (rtc_read(CMOS_BIOS_BOOTFLAG2)
+    if (CONFIG_QEMU || CONFIG_SETUP_MENU) {
+        u32 bootorder;
+        if (CONFIG_QEMU) {
+            // On emulators, get boot order from nvram.
+            if (rtc_read(CMOS_BIOS_BOOTFLAG1) & 1)
+                CheckFloppySig = 0;
+            bootorder = (rtc_read(CMOS_BIOS_BOOTFLAG2)
                          | ((rtc_read(CMOS_BIOS_BOOTFLAG1) & 0xf0) << 4));
+        } else {
+            bootorder = setup_init();
+        }
         DefaultFloppyPrio = DefaultCDPrio = DefaultHDPrio
             = DefaultBEVPrio = DEFAULT_PRIO;
         int i;
-        for (i=101; i<104; i++) {
+        for (i=101; i<105; i++) {
             u32 val = bootorder & 0x0f;
             bootorder >>= 4;
             switch (val) {
@@ -711,17 +716,32 @@ interactive_bootmenu(void)
     int menutime = romfile_loadint("etc/boot-menu-wait", DEFAULT_BOOTMENU_WAIT);
     int menukey = romfile_loadint("etc/boot-menu-key", 1);
     int scan_code;
-    if (menutime >= 0) {
-        while (get_keystroke(0) >= 0)
-            ;
+    if (menutime >= 0 || CONFIG_SETUP_MENU) {
+        int key;
+        while ((key = get_keystroke(0)) >= 0)
+            if (key == 0x53)                    // DEL anywhere during POST
+                SetupRequested = 1;
 
+        if (CONFIG_SETUP_MENU)
+            setup_boot_password();
         char *bootmsg = romfile_loadfile("etc/boot-menu-message", NULL);
-        printf("%s", bootmsg ?: "\nPress ESC for boot menu.\n\n");
+        if (CONFIG_SETUP_MENU)
+            setup_post_warnings();
+        printf("%s", bootmsg ?: (CONFIG_SETUP_MENU
+                                 ? "Press DEL to enter SETUP, ESC for boot menu.\n"
+                                 : "\nPress ESC for boot menu.\n\n"));
         free(bootmsg);
 
+        if (CONFIG_SETUP_MENU)
+            menutime = setup_boot_delay();
         enable_bootsplash();
-        scan_code = get_keystroke(menutime);
+        scan_code = (CONFIG_SETUP_MENU && SetupRequested) ? 0x53 : get_keystroke(menutime);
         disable_bootsplash();
+        if (CONFIG_SETUP_MENU && scan_code == 0x53) {
+            wait_threads();
+            setup_menu();
+            return;
+        }
         if (scan_code != menukey)
             return;
     }
@@ -966,6 +986,8 @@ boot_rom(u32 vector)
 static void
 boot_fail(void)
 {
+    if (CONFIG_SETUP_MENU)
+        post_code(POST_NO_BOOT);
     if (BootRetryTime == (u32)-1)
         printf("No bootable device.\n");
     else
@@ -993,6 +1015,8 @@ do_boot(int seq_nr)
         boot_fail();
 
     // Boot the given BEV type.
+    if (CONFIG_SETUP_MENU)
+        post_code(POST_BOOT);
     struct bev_s *ie = &BEV[seq_nr];
     switch (ie->type) {
     case IPL_TYPE_FLOPPY:

@@ -30,6 +30,9 @@ static int EnforceChecksum, S3ResumeVga, RunPCIroms;
  * Helper functions
  ****************************************************************/
 
+// ISA option ROMs found by isa_roms_setup(), run in place from the ISA bus.
+static u32 IsaRomStart, IsaRomEnd;
+
 // Execute a given option rom.
 static void
 __callrom(struct rom_header *rom, u16 offset, u16 bdf)
@@ -46,9 +49,15 @@ __callrom(struct rom_header *rom, u16 offset, u16 bdf)
     br.es = SEG_BIOS;
     br.di = get_pnp_offset();
     br.code = SEGOFF(seg, offset);
+    // ISA ROM cards may have RAM in their window: send shadow-area writes to the bus meanwhile.
+    int isa = (u32)rom >= IsaRomStart && (u32)rom < IsaRomEnd;
+    if (isa)
+        umc_isa_writes(1);
     start_preempt();
     farcall16big(&br);
     finish_preempt();
+    if (isa)
+        umc_isa_writes(0);
 
 //dprintf(1, "after option rom\n");
 }
@@ -258,6 +267,14 @@ is_pci_vga(struct pci_device *pci)
     return 1;
 }
 
+// Display classes besides PCI_CLASS_DISPLAY_VGA whose ROM may still provide the console.
+static int
+is_other_display(struct pci_device *pci)
+{
+    return pci->class == PCI_CLASS_DISPLAY_XGA || pci->class == PCI_CLASS_DISPLAY_OTHER
+        || pci->class == PCI_CLASS_NOT_DEFINED_VGA;
+}
+
 // Copy a rom to its permanent location below 1MiB
 static struct rom_header *
 copy_rom(struct rom_header *rom)
@@ -408,28 +425,69 @@ dprintf(1, "PCI bef init\n");
  * Non-VGA option rom init
  ****************************************************************/
 
+#define ISA_ROM_BLOCK 0x4000
+#define ISA_ROM_END   0xe0000
+
+// ISA option ROMs (C8000-DFFFF) run in place from the ISA bus like the original BIOS: their 16 KiB
+// blocks stay routed to ISA, PnP ROMs are initialized now (legacy ones as BCVs at boot) and the PCI
+// ROMs are deployed after the last one.
+static void
+isa_roms_setup(void)
+{
+    u32 start = ALIGN(rom_get_last(), ISA_ROM_BLOCK), end = start, addr;
+    void *copy = CONFIG_SETUP_MENU ? malloc_tmphigh(ISA_ROM_BLOCK) : NULL;
+    for (addr = start; addr < ISA_ROM_END; addr += ISA_ROM_BLOCK) {
+        umc_isa_block(addr, 1);
+        if (copy && setup_isa_shadow(addr)) {   // "Shadow" in setup: run a copy from RAM
+            memcpy(copy, (void*)addr, ISA_ROM_BLOCK);
+            umc_isa_block(addr, 0);
+            memcpy((void*)addr, copy, ISA_ROM_BLOCK);
+        }
+    }
+    free(copy);
+    IsaRomStart = start;
+    IsaRomEnd = ISA_ROM_END;
+    for (addr = start; addr < ISA_ROM_END; ) {
+        struct rom_header *rom = (void*)addr;
+        if (rom->signature != OPTION_ROM_SIGNATURE || !rom->size
+            || checksum(rom, rom->size * 512)) {
+            addr += OPTION_ROM_ALIGN;
+            continue;
+        }
+        dprintf(1, "ISA option rom at %p (%d bytes)\n", rom, rom->size * 512);
+        if (get_pnp_rom(rom))
+            callrom(rom, 0);
+        addr += ALIGN(rom->size * 512, OPTION_ROM_ALIGN);
+        end = addr;
+    }
+    end = ALIGN(end, ISA_ROM_BLOCK);
+    for (addr = end; addr < ISA_ROM_END; addr += ISA_ROM_BLOCK)
+        umc_isa_block(addr, 0);
+    if (end != start)
+        rom_set_last(end);
+    IsaRomStart = start;
+    IsaRomEnd = end;
+}
+
 void
 optionrom_setup(void)
 {
     if (! CONFIG_OPTIONROMS)
         return;
 
-	//TODO should first do ISA ROM and then PCI ROM
-
-rom_set_last(0xd0000);
+    u32 post_vga = rom_get_last();
+    isa_roms_setup();
 
     dprintf(1, "Scan for option roms\n");
     u64 sources[(BUILD_BIOS_ADDR - BUILD_ROM_START) / OPTION_ROM_ALIGN];
     memset(sources, 0, sizeof(sources));
-    u32 post_vga = rom_get_last();
 
 dprintf(1, "==== rest of option ROMs @%x\n", post_vga);
 
     // Find and deploy PCI roms.
     struct pci_device *pci;
     foreachpci(pci) {
-        if (pci->class == PCI_CLASS_DISPLAY_VGA ||
-            pci->class == PCI_CLASS_DISPLAY_OTHER ||
+        if (pci->class == PCI_CLASS_DISPLAY_VGA || is_other_display(pci) ||
             pci->have_driver)
             continue;
         init_pcirom(pci, 0, sources);
@@ -489,6 +547,11 @@ dprintf(1, "post pnp\n");
             pnp = get_pnp_next(rom, pnp);
         }
     }
+
+    // Unused blocks go back to the ISA bus, like the original BIOS: cards with shared memory there.
+    u32 addr;
+    for (addr = ALIGN(rom_get_last(), ISA_ROM_BLOCK); addr < ISA_ROM_END; addr += ISA_ROM_BLOCK)
+        umc_isa_block(addr, 1);
 }
 
 
@@ -506,7 +569,7 @@ static int try_setup_display_other(void)
     dprintf(1, "No VGA found, scan for other PCI display\n");
 
     foreachpci(pci) {
-        if (pci->class != PCI_CLASS_DISPLAY_OTHER)
+        if (!is_other_display(pci))
             continue;
         struct rom_header *rom = map_pcirom(pci);
         if (!rom)

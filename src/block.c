@@ -76,12 +76,18 @@ host_lchs_supplied(struct drive_s *drive)
             drive->lchs.sector > 0 && drive->lchs.sector <= 63);
 }
 
-static u8
+u8
 get_translation(struct drive_s *drive)
 {
     if (host_lchs_supplied(drive))
         return TRANSLATION_HOST;
     u8 type = drive->type;
+    if (CONFIG_SETUP_MENU && type == DTYPE_ATA) {
+        static const u8 chosen[] = { 0, TRANSLATION_NONE, TRANSLATION_LBA, TRANSLATION_LARGE };
+        int mode = setup_ide_translation(drive);
+        if (mode)
+            return chosen[mode & 3];
+    }
     if (CONFIG_QEMU && type == DTYPE_ATA) {
         // Emulators pass in the translation info via nvram.
         u8 translation = rtc_read(CMOS_BIOS_DISKTRANSFLAG + drive->cntl_id/4);

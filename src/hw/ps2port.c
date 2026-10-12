@@ -510,11 +510,9 @@ ps2_keyboard_setup(void *data)
     if (ret)
         return;
 
-    // Set scancode command (mode 2)
+    // Set scancode command (mode 2); 84-key AT keyboards NAK it but already send set 2.
     param[0] = 0x02;
-    ret = ps2_kbd_command(ATKBD_CMD_SSCANSET, param);
-    if (ret)
-        return;
+    ps2_kbd_command(ATKBD_CMD_SSCANSET, param);
 
     // Keyboard Mode: disable mouse, scan code convert, enable kbd IRQ
     Ps2ctr = (I8042_CTR_AUXDIS | I8042_CTR_XLATE
