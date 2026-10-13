@@ -97,11 +97,8 @@ call32_post(void)
         lgdt(&gdt);
         SET_SEG(FS, GET_LOW(Call16Data.fs));
         SET_SEG(GS, GET_LOW(Call16Data.gs));
-
-        // Restore cr0
-        u32 cr0_caching = GET_LOW(Call16Data.cr0) & (CR0_CD|CR0_NW);
-        if (cr0_caching)
-            cr0_mask(CR0_CD|CR0_NW, cr0_caching);
+        // CR0.CD/NW are not restored: transition32 keeps them, and the value saved at an earlier
+        // call32_prep is stale once 32-bit code changed them (L2 init: the L1 stayed off afterwards).
     }
 
     // Restore cmos index register

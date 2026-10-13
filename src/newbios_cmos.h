@@ -6,6 +6,9 @@
 #ifndef NEWBIOS_CMOS_H
 #define NEWBIOS_CMOS_H
 
+#define NB_CMOS_L2        0x3e   /* L2 size and bank bits found by coreboot (UM8881 50h & 0Fh); L2 stays off until SeaBIOS;
+                                    bit 7: SeaBIOS is enabling the L2 (still set at the next POST: that hung);
+                                    bits 6-4: its step then (setup.c L2StepNames) */
 #define NB_CMOS_BASE      0x40
 #define NB_CMOS_HDD       0x62   /* 4 x 5 bytes per IDE drive: type, user cylinders (16-bit), heads, sectors */
 #define NB_CMOS_PASSWORD  0x78   /* 16-bit hash, 0 = no password */

@@ -10,6 +10,7 @@
 #include "output.h" // dprintf
 #include "romfile.h" // romfile_loadint
 #include "string.h" // memset
+#include "pcidevice.h" // struct pci_device
 #include "usb.h" // struct usb_s
 #include "usb-ehci.h" // ehci_setup
 #include "usb-xhci.h" // xhci_setup
@@ -208,8 +209,8 @@ usb_find_desc(struct usbdevice_s *usbdev, int type, int dir)
 {
     struct usb_endpoint_descriptor *epdesc = (void*)&usbdev->iface[1];
     for (;;) {
-        if ((void*)epdesc >= (void*)usbdev->iface + usbdev->imax
-            || epdesc->bDescriptorType == USB_DT_INTERFACE) {
+        if ((void*)epdesc + 2 > (void*)usbdev->iface + usbdev->imax
+            || epdesc->bLength < 2 || epdesc->bDescriptorType == USB_DT_INTERFACE) {
             return NULL;
         }
         if (epdesc->bDescriptorType == USB_DT_ENDPOINT
@@ -218,6 +219,50 @@ usb_find_desc(struct usbdevice_s *usbdev, int type, int dir)
             return epdesc;
         epdesc = (void*)epdesc + epdesc->bLength;
     }
+}
+
+struct usb_listed UsbListed[USB_LISTED_MAX];
+int UsbListedCount;
+
+static int
+usb_listed_find(void *key)
+{
+    int i;
+    for (i = 0; i < UsbListedCount; i++)
+        if (UsbListed[i].key == key)
+            return i;
+    return -1;
+}
+
+static int
+usb_listed_add(void *key, int parent)
+{
+    if (UsbListedCount >= USB_LISTED_MAX)
+        return -1;
+    struct usb_listed *l = &UsbListed[UsbListedCount];
+    memset(l, 0, sizeof(*l));
+    l->key = key;
+    l->parent = parent;
+    return UsbListedCount++;
+}
+
+// A device whose descriptors were read: listed under its hub, or under the controller of a root port.
+static void
+usb_list_device(struct usbdevice_s *usbdev, u16 vid, u16 pid, u8 cls, u8 proto)
+{
+    struct usbhub_s *hub = usbdev->hub;
+    int parent = usb_listed_find(hub->usbdev ? (void*)hub->usbdev : (void*)hub->cntl);
+    int i = usb_listed_add(usbdev, parent);
+    usbdev->listed = i;
+    if (i < 0)
+        return;
+    struct usb_listed *l = &UsbListed[i];
+    l->port = usbdev->port + 1;
+    l->speed = usbdev->speed;
+    l->vid = vid;
+    l->pid = pid;
+    l->cls = cls;
+    l->proto = proto;
 }
 
 // Get the first 8 bytes of the device descriptor.
@@ -245,7 +290,7 @@ get_device_config(struct usb_pipe *pipe)
     req.wIndex = 0;
     req.wLength = sizeof(cfg);
     int ret = usb_send_default_control(pipe, &req, &cfg);
-    if (ret)
+    if (ret || cfg.wTotalLength < sizeof(cfg))
         return NULL;
 
     struct usb_config_descriptor *config = malloc_tmphigh(cfg.wTotalLength);
@@ -347,7 +392,7 @@ configure_usb_device(struct usbdevice_s *usbdev)
         return 0;
     u16 maxpacket = dinfo.bMaxPacketSize0;
     if (dinfo.bcdUSB >= 0x0300)
-        maxpacket = 1 << dinfo.bMaxPacketSize0;
+        maxpacket = dinfo.bMaxPacketSize0 < 16 ? 1 << dinfo.bMaxPacketSize0 : 0;
     dprintf(3, "device rev=%04x cls=%02x sub=%02x proto=%02x size=%d\n"
             , dinfo.bcdUSB, dinfo.bDeviceClass, dinfo.bDeviceSubClass
             , dinfo.bDeviceProtocol, maxpacket);
@@ -361,10 +406,19 @@ configure_usb_device(struct usbdevice_s *usbdev)
     if (!usbdev->defpipe)
         return -1;
 
+    // Vendor and product, for the setup's USB page
+    struct usb_device_descriptor full;
+    struct usb_ctrlrequest req = { USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                   USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, sizeof(full) };
+    if (usb_send_default_control(usbdev->defpipe, &req, &full))
+        full.idVendor = full.idProduct = 0;
+
     // Get configuration
     struct usb_config_descriptor *config = get_device_config(usbdev->defpipe);
-    if (!config)
+    if (!config) {
+        usb_list_device(usbdev, full.idVendor, full.idProduct, dinfo.bDeviceClass, 0);
         return 0;
+    }
 
     // Determine if a driver exists for this device - only look at the
     // interfaces of the first configuration.
@@ -372,9 +426,12 @@ configure_usb_device(struct usbdevice_s *usbdev)
     void *config_end = (void*)config + config->wTotalLength;
     struct usb_interface_descriptor *iface = (void*)(&config[1]);
     for (;;) {
-        if (!num_iface || (void*)iface + iface->bLength > config_end)
+        if (!num_iface || (void*)&iface[1] > config_end
+            || (void*)iface + iface->bLength > config_end) {
             // Not a supported device.
+            usb_list_device(usbdev, full.idVendor, full.idProduct, dinfo.bDeviceClass, 0);
             goto fail;
+        }
         if (iface->bDescriptorType == USB_DT_INTERFACE) {
             num_iface--;
             if (iface->bInterfaceClass == USB_CLASS_HUB
@@ -387,6 +444,8 @@ configure_usb_device(struct usbdevice_s *usbdev)
         }
         iface = (void*)iface + iface->bLength;
     }
+
+    usb_list_device(usbdev, full.idVendor, full.idProduct, iface->bInterfaceClass, iface->bInterfaceProtocol);
 
     // Set the configuration.
     ret = set_configuration(usbdev->defpipe, config->bConfigurationValue);
@@ -410,8 +469,14 @@ configure_usb_device(struct usbdevice_s *usbdev)
         goto fail;
 
     free(config);
+    if (usbdev->listed >= 0) {
+        UsbListed[usbdev->listed].ok = 1;
+        UsbListed[usbdev->listed].key = NULL;    // freed after this: no later device may match it
+    }
     return 1;
 fail:
+    if (usbdev->listed >= 0)
+        UsbListed[usbdev->listed].key = NULL;
     free(config);
     return 0;
 }
@@ -477,6 +542,14 @@ usb_enumerate(struct usbhub_s *hub)
     u32 portcount = hub->portcount;
     hub->threads = portcount;
     hub->detectend = timer_calc(usb_time_sigatt);
+    if (!hub->usbdev && usb_listed_find(hub->cntl) < 0) {     // a root hub: list its controller
+        int i = usb_listed_add(hub->cntl, -1);
+        if (i >= 0) {
+            UsbListed[i].type = hub->cntl->type;
+            UsbListed[i].bdf = hub->cntl->pci ? hub->cntl->pci->bdf : 0;
+            UsbListed[i].port = portcount;
+        }
+    }
 
     // Launch a thread for every port.
     int i;
@@ -489,6 +562,7 @@ usb_enumerate(struct usbhub_s *hub)
         memset(usbdev, 0, sizeof(*usbdev));
         usbdev->hub = hub;
         usbdev->port = i;
+        usbdev->listed = -1;
         run_thread(usb_hub_port_setup, usbdev);
     }
 

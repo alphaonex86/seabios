@@ -76,13 +76,14 @@ static inline void __cpuid(u32 index, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx)
         : "0" (index));
 }
 
+// volatile and ordered with memory: a cached CR0 value would undo a cache enable/disable in between
 static inline u32 cr0_read(void) {
     u32 cr0;
-    asm("movl %%cr0, %0" : "=r"(cr0));
+    asm volatile("movl %%cr0, %0" : "=r"(cr0) : : "memory");
     return cr0;
 }
 static inline void cr0_write(u32 cr0) {
-    asm("movl %0, %%cr0" : : "r"(cr0));
+    asm volatile("movl %0, %%cr0" : : "r"(cr0) : "memory");
 }
 static inline void cr0_mask(u32 off, u32 on) {
     cr0_write((cr0_read() & ~off) | on);
@@ -147,28 +148,30 @@ static inline u32 ror(u32 val, u16 ror) {
     return res;
 }
 
+// Port I/O is ordered with memory accesses ("memory" clobber): chipset registers such as the UM8881
+// L2 and shadow controls change what the next memory access does.
 static inline void outb(u8 value, u16 port) {
-    __asm__ __volatile__("outb %b0, %w1" : : "a"(value), "Nd"(port));
+    __asm__ __volatile__("outb %b0, %w1" : : "a"(value), "Nd"(port) : "memory");
 }
 static inline void outw(u16 value, u16 port) {
-    __asm__ __volatile__("outw %w0, %w1" : : "a"(value), "Nd"(port));
+    __asm__ __volatile__("outw %w0, %w1" : : "a"(value), "Nd"(port) : "memory");
 }
 static inline void outl(u32 value, u16 port) {
-    __asm__ __volatile__("outl %0, %w1" : : "a"(value), "Nd"(port));
+    __asm__ __volatile__("outl %0, %w1" : : "a"(value), "Nd"(port) : "memory");
 }
 static inline u8 inb(u16 port) {
     u8 value;
-    __asm__ __volatile__("inb %w1, %b0" : "=a"(value) : "Nd"(port));
+    __asm__ __volatile__("inb %w1, %b0" : "=a"(value) : "Nd"(port) : "memory");
     return value;
 }
 static inline u16 inw(u16 port) {
     u16 value;
-    __asm__ __volatile__("inw %w1, %w0" : "=a"(value) : "Nd"(port));
+    __asm__ __volatile__("inw %w1, %w0" : "=a"(value) : "Nd"(port) : "memory");
     return value;
 }
 static inline u32 inl(u16 port) {
     u32 value;
-    __asm__ __volatile__("inl %w1, %0" : "=a"(value) : "Nd"(port));
+    __asm__ __volatile__("inl %w1, %0" : "=a"(value) : "Nd"(port) : "memory");
     return value;
 }
 

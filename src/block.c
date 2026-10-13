@@ -82,10 +82,16 @@ get_translation(struct drive_s *drive)
     if (host_lchs_supplied(drive))
         return TRANSLATION_HOST;
     u8 type = drive->type;
+    u16 heads = drive->pchs.head;
+    u16 cylinders = drive->pchs.cylinder;
+    u16 spt = drive->pchs.sector;
+    u64 sectors = drive->sectors;
+    u64 psectors = (u64)heads * cylinders * spt;
+    int pchs_valid = heads && heads <= 255 && cylinders && spt && spt <= 63 && psectors <= sectors;
     if (CONFIG_SETUP_MENU && type == DTYPE_ATA) {
         static const u8 chosen[] = { 0, TRANSLATION_NONE, TRANSLATION_LBA, TRANSLATION_LARGE };
         int mode = setup_ide_translation(drive);
-        if (mode)
+        if (mode && (pchs_valid || chosen[mode & 3] == TRANSLATION_LBA))
             return chosen[mode & 3];
     }
     if (CONFIG_QEMU && type == DTYPE_ATA) {
@@ -97,18 +103,13 @@ get_translation(struct drive_s *drive)
     }
 
     // Otherwise use a heuristic to determine translation type.
-    u16 heads = drive->pchs.head;
-    u16 cylinders = drive->pchs.cylinder;
-    u16 spt = drive->pchs.sector;
-    u64 sectors = drive->sectors;
-    u64 psectors = (u64)heads * cylinders * spt;
-    if (!heads || !cylinders || !spt || psectors > sectors)
+    if (!pchs_valid)
         // pchs doesn't look valid - use LBA.
         return TRANSLATION_LBA;
 
     if (cylinders <= 1024 && heads <= 16 && spt <= 63)
         return TRANSLATION_NONE;
-    if (cylinders * heads <= 131072)
+    if ((u32)cylinders * heads <= 131072)
         return TRANSLATION_LARGE;
     return TRANSLATION_LBA;
 }

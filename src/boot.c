@@ -518,6 +518,21 @@ struct bootentry_s {
 };
 static struct hlist_head BootList VARVERIFY32INIT;
 
+// The hard disks (IPL_TYPE_HARDDISK, defined below) of the boot list and their descriptions: how many, up to max.
+int
+boot_hd_list(struct drive_s **drive, const char **desc, int max)
+{
+    struct bootentry_s *pos;
+    int n = 0;
+    hlist_for_each_entry(pos, &BootList, node) {
+        if (pos->type == 0x02 && n < max) {
+            drive[n] = pos->drive;
+            desc[n++] = pos->description;
+        }
+    }
+    return n;
+}
+
 #define IPL_TYPE_FLOPPY      0x01
 #define IPL_TYPE_HARDDISK    0x02
 #define IPL_TYPE_CDROM       0x03
@@ -740,7 +755,9 @@ interactive_bootmenu(void)
         if (CONFIG_SETUP_MENU && scan_code == 0x53) {
             wait_threads();
             setup_menu();
-            return;
+            if (!SetupBootMenu)
+                return;
+            scan_code = menukey;                // F8 in the setup: the boot menu
         }
         if (scan_code != menukey)
             return;
