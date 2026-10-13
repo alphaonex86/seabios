@@ -448,42 +448,70 @@ ps2_check_event(void)
 
 int PS2KeyboardOK;
 
-static void
-ps2_keyboard_setup(void *data)
+// Why the last keyboard init failed, for the POST error line: the step and the byte received (-1: none).
+enum { KF_NONE, KF_CONTROLLER, KF_SELFTEST, KF_LINES, KF_RESET, KF_BAT, KF_DISABLE, KF_ENABLE };
+static const char * const KbdSteps[] = {
+    "", "8042 not answering", "8042 self test", "8042 keyboard line test", "no answer to reset",
+    "keyboard self test", "disable not acknowledged", "enable not acknowledged"
+};
+static int KbdFailStep, KbdFailByte;
+
+static int
+kbd_fail(int step, int got)
+{
+    KbdFailStep = step;
+    KbdFailByte = got;
+    return -1;
+}
+
+void
+ps2_kbd_failure(char *buf, int size)
+{
+    if (!KbdFailStep)
+        *buf = 0;
+    else if (KbdFailByte < 0)
+        snprintf(buf, size, " (%s)", KbdSteps[KbdFailStep]);
+    else
+        snprintf(buf, size, " (%s, got %02x)", KbdSteps[KbdFailStep], KbdFailByte);
+}
+
+
+static int
+ps2_keyboard_init(void)
 {
     // flush incoming keys (also verifies port is likely present)
     int ret = i8042_flush();
     if (ret)
-        return;
+        return kbd_fail(KF_CONTROLLER, -1);
 
     // Disable keyboard / mouse and drain any input they may have sent
     ret = i8042_command(I8042_CMD_KBD_DISABLE, NULL);
     if (ret)
-        return;
+        return kbd_fail(KF_CONTROLLER, -1);
     ret = i8042_command(I8042_CMD_AUX_DISABLE, NULL);
     if (ret)
-        return;
+        return kbd_fail(KF_CONTROLLER, -1);
     ret = i8042_flush();
     if (ret)
-        return;
+        return kbd_fail(KF_CONTROLLER, -1);
 
     // Controller self-test.
     u8 param[2];
     ret = i8042_command(I8042_CMD_CTL_TEST, param);
     if (ret)
-        return;
+        return kbd_fail(KF_SELFTEST, -1);
     if (param[0] != 0x55) {
         dprintf(1, "i8042 self test failed (got %x not 0x55)\n", param[0]);
-        return;
+        return kbd_fail(KF_SELFTEST, param[0]);
     }
 
     // Controller keyboard test.
     ret = i8042_command(I8042_CMD_KBD_TEST, param);
     if (ret)
-        return;
+        return kbd_fail(KF_LINES, -1);
     if (param[0] != 0x00) {
         dprintf(1, "i8042 keyboard test failed (got %x not 0x00)\n", param[0]);
-        return;
+        return kbd_fail(KF_LINES, param[0]);
     }
 
 
@@ -498,19 +526,19 @@ ps2_keyboard_setup(void *data)
         if (timer_check(end)) {
             if (spinupdelay)
                 warn_timeout();
-            return;
+            return kbd_fail(KF_RESET, -1);
         }
         yield();
     }
     if (param[0] != 0xaa) {
         dprintf(1, "keyboard self test failed (got %x not 0xaa)\n", param[0]);
-        return;
+        return kbd_fail(KF_BAT, param[0]);
     }
 
     /* Disable keyboard */
     ret = ps2_kbd_command(ATKBD_CMD_RESET_DIS, NULL);
     if (ret)
-        return;
+        return kbd_fail(KF_DISABLE, -1);
 
     // Set scancode command (mode 2); 84-key AT keyboards NAK it but already send set 2.
     param[0] = 0x02;
@@ -523,8 +551,22 @@ ps2_keyboard_setup(void *data)
     /* Enable keyboard */
     ret = ps2_kbd_command(ATKBD_CMD_ENABLE, NULL);
     if (ret)
-        return;
+        return kbd_fail(KF_ENABLE, -1);
 
+    return 0;
+}
+
+// After power-on the controller and the keyboard may still be in their self tests: retry for 3 s, as
+// the original BIOS waits (a cold boot reported no keyboard on the real board, a reset found it).
+static void
+ps2_keyboard_setup(void *data)
+{
+    u32 end = timer_calc(3000);
+    while (ps2_keyboard_init()) {
+        if (timer_check(end))
+            return;
+        msleep(100);
+    }
     dprintf(1, "PS2 keyboard initialized\n");
     PS2KeyboardOK = 1;
 }

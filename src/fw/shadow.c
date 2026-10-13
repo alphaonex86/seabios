@@ -181,6 +181,8 @@ make_bios_writable_umc(void)
 void
 umc_isa_block(u32 addr, int isa)
 {
+	if (addr < 0xc8000 || addr >= 0xe0000)
+		return;
 	const u16 bdf = pci_to_bdf(0, 0x10, 0);
 	const u8 bit = 1 << (2 + (addr - 0xc8000) / 0x4000);
 	u8 val = pci_config_readb(bdf, 0x54);

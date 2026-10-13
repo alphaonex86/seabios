@@ -14,6 +14,7 @@ struct ata_channel_s {
     u8  ataid;
     int pci_bdf;
     struct pci_device *pci_tmp;
+    u32 master_sig;     // IDENTIFY of device 0, to spot a device 1 that is its ghost
 };
 
 struct atadrive_s {

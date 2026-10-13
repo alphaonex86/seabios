@@ -64,5 +64,6 @@ int ps2_mouse_command(int command, u8 *param);
 void ps2_check_event(void);
 void ps2port_setup(void);
 extern int PS2KeyboardOK;
+void ps2_kbd_failure(char *buf, int size);
 
 #endif // ps2port.h

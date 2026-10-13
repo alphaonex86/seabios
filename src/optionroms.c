@@ -111,7 +111,7 @@ get_pnp_rom(struct rom_header *rom)
 static struct pnp_data *
 get_pnp_next(struct rom_header *rom, struct pnp_data *pnp)
 {
-    if (! pnp->nextoffset)
+    if ((u8*)rom + pnp->nextoffset <= (u8*)pnp)
         return NULL;
     pnp = (void*)((u8*)rom + pnp->nextoffset);
     if (pnp->signature != PNP_SIGNATURE)
@@ -340,8 +340,7 @@ map_pcirom(struct pci_device *pci)
         struct pci_data *pd = get_pci_rom(rom);
         if (! pd) {
             dprintf(3, "No valid pci signature found\n");
-        //ignore signature
-            // goto fail;
+            goto fail;
         }
 
         if (pd->vendor == pci->vendor && pd->device == pci->device
@@ -350,7 +349,7 @@ map_pcirom(struct pci_device *pci)
             break;
         dprintf(3, "Didn't match dev/ven (got %04x:%04x) or type (got %d)\n"
                 , pd->vendor, pd->device, pd->type);
-        if (pd->indicator & 0x80) {
+        if (pd->indicator & 0x80 || !pd->ilen) {
             dprintf(3, "No more images left\n");
             goto fail;
         }
@@ -379,23 +378,6 @@ static void boot_irq_restore(void)
     SET_IVT(0x19, seabios);
 }
 
-// Built-in boot ROM for the first card without one whose vendor:device is in "etc/pxe-pci-ids" (u32
-// device << 16 | vendor each): "pxe.rom", deployed once since it tries every supported card in turn.
-static struct romfile_s *
-pxe_romfile(struct pci_device *pci)
-{
-    static int deployed;
-    int size, i, found = 0;
-    u32 *ids = deployed ? NULL : romfile_loadfile("etc/pxe-pci-ids", &size);
-    if (!ids)
-        return NULL;
-    for (i = 0; i < size / 4; i++)
-        found |= ids[i] == (pci->device << 16 | pci->vendor);
-    free(ids);
-    deployed = found;
-    return found ? romfile_find("pxe.rom") : NULL;
-}
-
 // Attempt to map and initialize the option rom on a given PCI device.
 static void
 init_pcirom(struct pci_device *pci, int isvga, u64 *sources)
@@ -416,8 +398,6 @@ dprintf(3, "PCIROM1 %p\n", rom);
         rom = map_pcirom(pci);
 dprintf(3, "PCIROM2 %p\n", rom);
         }
-    if (!rom && !isvga && (file = pxe_romfile(pci)))
-        rom = deploy_romfile(file);
     if (! rom) {
 dprintf(3, "PCI NO ROM\n");
         // No ROM present.
@@ -488,6 +468,65 @@ isa_roms_setup(void)
     IsaRomEnd = end;
 }
 
+/****************************************************************
+ * Boot ROM in the flash
+ ****************************************************************/
+
+// A 2 Mbit flash holds iPXE in its lower 128 KiB, decoded at FFFC0000 while UM8886 57h bits 7-6 are set (with a
+// 1 Mbit chip that is the BIOS's own first half again: no valid ROM there). Copied while the decode is on, it
+// becomes the boot ROM of the board's Realtek NICs, in place of their socket ROMs.
+#ifndef FLASH_LOW_BASE
+#define FLASH_LOW_BASE 0xfffc0000
+#endif
+static u8 *FlashRom;
+static u32 FlashRomSize;
+
+static int
+flash_rom_copy(struct romfile_s *file, void *dest, u32 maxlen)
+{
+    if (FlashRomSize > maxlen)
+        return -1;
+    memcpy(dest, FlashRom, FlashRomSize);
+    return FlashRomSize;
+}
+
+static void
+flash_rom_setup(void)
+{
+    static const u16 nics[] = { 0x8039, 0x8139, 0x8169 };
+    u16 ibc = pci_to_bdf(0, 0x12, 0);
+    u8 r57 = pci_config_readb(ibc, 0x57);
+    pci_config_writeb(ibc, 0x57, r57 | 0xc0);
+    void *rom = (void *)FLASH_LOW_BASE;
+    u32 size = readw(rom) == OPTION_ROM_SIGNATURE ? readb(rom + 2) * 512 : 0;
+    u8 *copy = size ? malloc_tmphigh(size) : NULL;
+    for (u32 i = 0; copy && i < size; i++)
+        copy[i] = readb(rom + i);
+    pci_config_writeb(ibc, 0x57, r57);
+    u8 sum = 0;
+    for (u32 i = 0; copy && i < size; i++)
+        sum += copy[i];
+    if (!copy || sum) {
+        free(copy);
+        return;
+    }
+    FlashRom = copy;
+    FlashRomSize = size;
+    dprintf(1, "Boot ROM in the flash: %d bytes\n", size);
+    for (int i = 0; i < ARRAY_SIZE(nics); i++) {
+        struct romfile_s *file = malloc_tmp(sizeof(*file));
+        if (!file) {
+            warn_noalloc();
+            return;
+        }
+        memset(file, 0, sizeof(*file));
+        snprintf(file->name, sizeof(file->name), "pci10ec,%04x.rom", nics[i]);
+        file->size = size;
+        file->copy = flash_rom_copy;
+        romfile_add(file);
+    }
+}
+
 void
 optionrom_setup(void)
 {
@@ -496,6 +535,7 @@ optionrom_setup(void)
 
     u32 post_vga = rom_get_last();
     isa_roms_setup();
+    flash_rom_setup();
 
     dprintf(1, "Scan for option roms\n");
     u64 sources[(BUILD_BIOS_ADDR - BUILD_ROM_START) / OPTION_ROM_ALIGN];
@@ -532,7 +572,8 @@ dprintf(3, "rom end2 %x\n", rom_get_last());
 dprintf(3, "rom end3 %x, pos %x\n", rom_get_last(), pos);
 
         struct rom_header *rom = (void*)pos;
-        if (! is_valid_rom(rom)) {
+        if (! is_valid_rom(rom) || (pos >= IsaRomStart && pos < IsaRomEnd
+                                    && checksum(rom, rom->size * 512))) {
             pos += OPTION_ROM_ALIGN;
             continue;
         }

@@ -189,7 +189,7 @@ start_ohci(struct usb_ohci_s *cntl, struct ohci_hcca *hcca)
     writel(&cntl->regs->cmdstatus, OHCI_HCR);
     for (;;) {
         u32 status = readl(&cntl->regs->cmdstatus);
-        if (! status & OHCI_HCR)
+        if (!(status & OHCI_HCR))
             break;
         if (timer_check(end)) {
             warn_timeout();
@@ -284,13 +284,15 @@ ohci_controller_setup(struct pci_device *pci)
 
     dprintf(1, "OHCI init on dev %pP (regs=%p)\n", pci, cntl->regs);
 
-    pci_enable_busmaster(pci);
-
-    // XXX - check for and disable SMM control?
+    // Stop list processing (state USBRESET) before bus mastering: after a warm boot the controller may
+    // still run the schedule an OS left in RAM.
+    writel(&cntl->regs->control, 0);
 
     // Disable interrupts
     writel(&cntl->regs->intrdisable, ~0);
     writel(&cntl->regs->intrstatus, ~0);
+
+    pci_enable_busmaster(pci);
 
     run_thread(configure_ohci, cntl);
 }

@@ -8,7 +8,9 @@
 #include "e820map.h" // e820_list
 #include "malloc.h" // malloc_tmphigh
 #include "bregs.h" // struct bregs
+#include "hw/ata.h" // ata_process_op
 #include "hw/pci.h" // pci_config_readb
+#include "hw/usb.h" // UsbListed
 #include "hw/pci_regs.h" // PCI_INTERRUPT_LINE
 #include "hw/pcidevice.h" // foreachpci
 #include "hw/ps2port.h" // ps2_kbd_command
@@ -27,7 +29,7 @@ u8 SetupL1Off VARFSEG;                          // "CPU Internal Cache" disabled
 static u16 Password;   // hash, 0 = none
 
 static const u8 Defaults[NB_COUNT] = {
-    [NB_FLOPPY_A] = 4, [NB_L1_CACHE] = 1, [NB_L2_CACHE] = 1,
+    [NB_FLOPPY_A] = 4, [NB_HALT_ON] = CONFIG_NEWBIOS_HALT_ON, [NB_L1_CACHE] = 1, [NB_L2_CACHE] = 1,
     [NB_BOOT1] = 1, [NB_BOOT2] = 2, [NB_BOOT3] = 3, [NB_BOOT4] = 4,
     [NB_BOOT_DELAY] = 1, [NB_NUMLOCK] = 1, [NB_QUICK_POST] = 1, [NB_IDE_BLOCK] = 1, [NB_CHIPSET_AUTO] = 1, [NB_APM] = 1,
     [NB_IDE_32BIT] = 1, [NB_ISAPNP] = 1, [NB_IDE_PRIMARY] = 1, [NB_IDE_SECONDARY] = 1, [NB_FDC] = 1,
@@ -321,7 +323,7 @@ setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pi
     IdeInfo[idx].present = 1;
     IdeInfo[idx].atapi = atapi;
     IdeInfo[idx].drive = drive;
-    IdeInfo[idx].sectors = drive->sectors;
+    IdeInfo[idx].sectors = drive->sectors > 0xffffffff ? 0xffffffff : drive->sectors;
     IdeInfo[idx].cyl = identify[1];
     IdeInfo[idx].heads = identify[3];
     IdeInfo[idx].spt = identify[6];
@@ -378,8 +380,12 @@ setup_post_warnings(void)
             errors |= post_error(ERR_DISK, "Hard disk(s) fail (80)");
             break;
         }
-    if (!PS2KeyboardOK && !usb_kbd_active())
-        errors |= post_error(ERR_KEYBOARD, "Keyboard error or no keyboard present");
+    if (!PS2KeyboardOK && !usb_kbd_active()) {
+        char why[48], line[80];
+        ps2_kbd_failure(why, sizeof(why));
+        snprintf(line, sizeof(line), "Keyboard error or no keyboard present%s", why);
+        errors |= post_error(ERR_KEYBOARD, line);
+    }
     if (SetupDefaulted)
         errors |= post_error(ERR_OTHER, "CMOS checksum error - Defaults loaded");
     if (!(rtc_read(CMOS_STATUS_D) & 0x80))  // VRT: RAM and time valid
@@ -390,8 +396,13 @@ setup_post_warnings(void)
     }
     if (ChipsetFallback)
         printf("Chipset setup values not used after %d unfinished POSTs.\n", ChipsetFallback);
-    if (!(errors & halts[Setting[NB_HALT_ON]]))
+    if (!(errors & halts[Setting[NB_HALT_ON]])) {
+        if (errors) {
+            printf("WARNING: POST errors above, boot continues (Halt On)\n");
+            msleep(3000);
+        }
         return;
+    }
     printf("Press F1 to continue, DEL to enter SETUP\n");
     for (;;) {
         int key = get_keystroke(1000);
@@ -967,7 +978,7 @@ draw_help(int page)
     }
     scr_puts(ROW_HELP, 2, AttrText,
              "ESC : Quit                \x18\x19\x1a\x1b : Select Item     PU/PD/+/- : Modify");
-    scr_puts(ROW_HELP + 1, 2, AttrText, "F10 : Save & Exit Setup");
+    scr_puts(ROW_HELP + 1, 2, AttrText, "F10 : Save & Exit Setup   F8 : Boot Menu");
 }
 
 static void
@@ -1193,7 +1204,8 @@ cpu_cyrix_dir0(void)
     return inb(0x23);
 }
 
-// Core clock of 486-class CPUs: dec + taken jnz is 4 clocks, timed with PIT channel 2.
+// Core clock of 486-class CPUs: dec + taken jnz is 4 clocks, timed with PIT channel 2; 16-byte aligned
+// (unaligned it took 4-5 clocks: 107-121 MHz shown on the 133 MHz board).
 static u32
 cpu_mhz(void)
 {
@@ -1203,7 +1215,7 @@ cpu_mhz(void)
     outb(0xb0, 0x43);
     outb(0xff, 0x42);
     outb(0xff, 0x42);
-    asm volatile("1: decl %0; jnz 1b" : "+r"(n));
+    asm volatile(".align 16\n1: decl %0; jnz 1b" : "+r"(n));
     outb(0x80, 0x43);
     u32 left = inb(0x42);
     left |= inb(0x42) << 8;
@@ -1211,6 +1223,24 @@ cpu_mhz(void)
     u32 ticks = 0xffff - left;
     return ticks ? (954400000 / ticks + 500) / 1000 : 0;   // 800000 clocks * 1.193 MHz
 }
+
+// What setup_l2_cache found, for the CPU page (the reason when the L2 stays off).
+enum { L2_NOT_RUN, L2_NONE, L2_SETUP_OFF, L2_RAM_SMALL, L2_HUNG, L2_TAG0, L2_TAGMIX, L2_TAGMAX, L2_NOCACHE, L2_OK };
+static const char * const L2Names[] = {
+    "not checked", "none found", "off in setup", "RAM too small to init", "hang in the previous L2 init",
+    "check failed: tag 0", "check failed: mixed tag", "check failed: tag all ones", "check failed: no caching",
+    "checked"
+};
+static int L2Status;
+
+// Steps of the L2 init, kept in CMOS 3Eh bits 6-4 while they run: after a hang or a reset the next POST
+// shows the step (CPU page, CACHE TEST). In the CACHE TEST log each step also shows for 1 s.
+enum { L2S_NONE, L2S_CACHES_OFF, L2S_FILL_WT, L2S_CHECKS, L2S_FILL_WB, L2S_RESTORE, L2S_SPEED, L2S_DISABLE };
+static const char * const L2StepNames[] = {
+    "", "L1 off and WBINVD", "write-through fill", "tag checks", "write-back fill", "caches back on",
+    "speed test", "L2 off (evict pass)"
+};
+static u8 L2HungStep;   // the step the previous POST's L2 init stopped at
 
 static void
 info_cpu(void)
@@ -1248,10 +1278,19 @@ info_cpu(void)
     snprintf(line, sizeof(line), "L1 cache       : %s",
              (cr0_read() & CR0_CD) ? "disabled" : "enabled");
     info_line(row++, line);
-    u8 l2 = pci_config_readb(HB_BDF, 0x50);
-    snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s)",
-             (l2 & 7) ? 32 << (l2 & 7) : 0, (l2 & 0x40) ? "write-back" : "write-through",
-             (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1);
+    u8 l2 = pci_config_readb(HB_BDF, 0x50), found = rtc_read(NB_CMOS_L2);
+    if (L2Status == L2_OK || L2Status == L2_NOT_RUN)
+        snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s)",
+                 (l2 & 7) ? 32 << (l2 & 7) : 0, (l2 & 0x40) ? "write-back" : "write-through",
+                 (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1);
+    else if (L2Status == L2_NONE)
+        snprintf(line, sizeof(line), "L2 cache       : none");
+    else if (L2Status == L2_HUNG && L2HungStep)
+        snprintf(line, sizeof(line), "L2 cache       : %d KB, OFF: last init stopped at %s",
+                 (found & 7) ? 32 << (found & 7) : 0, L2StepNames[L2HungStep]);
+    else    // found but left off: why
+        snprintf(line, sizeof(line), "L2 cache       : %d KB, %d bank(s), OFF: %s",
+                 (found & 7) ? 32 << (found & 7) : 0, (found & 8) ? 2 : 1, L2Names[L2Status]);
     info_line(row++, line);
     row++;
     u32 extkb = ext_mem_kb();
@@ -1368,6 +1407,48 @@ irq_owners(const char *owner[16])
             owner[i] = PnpIrq[i];
 }
 
+// USB tree: each level one more space of indentation.
+static int
+info_usb_level(int parent, int depth, int row)
+{
+    static const char * const speed[] = { "full", "low", "high", "super" };
+    static const char * const type[] = { "", "UHCI", "OHCI", "EHCI", "xHCI" };
+    char line[80], what[24];
+    int i, ind = depth < 20 ? depth : 20;
+    memset(line, ' ', ind);                 // one space per level (SeaBIOS snprintf has no '*' width)
+    for (i = 0; i < UsbListedCount && row <= 19; i++) {
+        struct usb_listed *l = &UsbListed[i];
+        if (l->parent != parent)
+            continue;
+        if (parent < 0)
+            snprintf(line + ind, sizeof(line) - ind, "%s %02x:%02x.%x, %d ports", type[l->type & 7],
+                     pci_bdf_to_bus(l->bdf), pci_bdf_to_dev(l->bdf), pci_bdf_to_fn(l->bdf), l->port);
+        else {
+            if (l->cls == USB_CLASS_HUB)
+                snprintf(what, sizeof(what), "hub");
+            else if (l->cls == USB_CLASS_MASS_STORAGE)
+                snprintf(what, sizeof(what), "storage");
+            else if (l->cls == USB_CLASS_HID)
+                snprintf(what, sizeof(what), l->proto == 1 ? "keyboard" : l->proto == 2 ? "mouse" : "HID");
+            else
+                snprintf(what, sizeof(what), "class %02x", l->cls);
+            snprintf(line + ind, sizeof(line) - ind, "port %d: %04x:%04x %s, %s speed%s", l->port,
+                     l->vid, l->pid, what, speed[l->speed & 3], l->ok ? "" : ", no driver");
+        }
+        info_line(row++, line);
+        row = info_usb_level(i, depth + 1, row);
+    }
+    return row;
+}
+
+static void
+info_usb(void)
+{
+    scr_puts(4, 3, AttrTitle, "Controllers, ports and devices");
+    if (info_usb_level(-1, 0, 5) == 5)
+        info_line(5, "none");
+}
+
 static void
 info_isa(void)
 {
@@ -1460,8 +1541,10 @@ info_chipset(void)
     info_line(18, line);
 }
 
-static void info_speed(void);
-static void chart_end(void);
+static void info_bench_memory(void);
+static void info_bench_cpu(void);
+static void info_bench_disk(void);
+static void info_bench_disk_bars(void);
 static void mt_run(void);
 
 /****************************************************************
@@ -1522,12 +1605,16 @@ pnp_isolate(u8 *id)
     return any && sum == id[8];
 }
 
+static int PnpLeft;                            // resource bytes the current card may still send
+static int IsaCsns;                            // cards isolated and configured
+
 static u8
 pnp_data(void)
 {
     int i;
     for (i = 0; i < 1000 && !(pnp_read(0x05) & 1); i++)
         udelay(10);
+    PnpLeft = i == 1000 ? 0 : PnpLeft - 1;
     return pnp_read(0x04);
 }
 
@@ -1556,7 +1643,7 @@ pnp_io_free(u16 base, u8 len, const u16 (*used)[2], int count)
 // Gives one dependent function of a logical device free resources; 0 if they are not all free.
 static int
 pnp_assign(struct pnp_item *items, int count, int alt, u16 *irqs, u8 *dmas, u16 (*used)[2], int *nused,
-           u16 *io, u8 *irq, u8 *dma)
+           u16 *io, u8 *iolen, u8 *irq, u8 *dma)
 {
     int i, nio = 0, nirq = 0, ndma = 0;
     for (i = 0; i < count; i++) {
@@ -1586,6 +1673,7 @@ pnp_assign(struct pnp_item *items, int count, int alt, u16 *irqs, u8 *dmas, u16 
             return 0;
         used[*nused][0] = v;
         used[(*nused)++][1] = it->len;
+        iolen[nio] = it->len;
         io[nio++] = v;
     }
     return 1;
@@ -1601,17 +1689,18 @@ pnp_card(int csn, u8 *id, u16 *irqs, u8 *dmas, u16 (*used)[2], int *nused)
     char *line = PnpCard[csn - 1];
     snprintf(line, sizeof(PnpCard[0]), "ISA PnP %c%c%c%02x%02x:", '@' + (id[0] >> 2 & 0x1f),
              '@' + ((id[0] & 3) << 3 | id[1] >> 5), '@' + (id[1] & 0x1f), id[2], id[3]);
+    PnpLeft = 4096;
     for (i = 0; i < 9; i++)
         pnp_data();                             // the serial identifier again
-    for (tags = 0; tags < 200 && !done; tags++) {
+    for (tags = 0; tags < 200 && !done && PnpLeft > 0; tags++) {
         u8 tag = pnp_data();
-        u8 d[24];
+        u8 d[24] = { 0 };                       // short items: missing bytes read as 0
         n = tag & 7;
         if (tag & 0x80) {                       // large item: 16-bit length
             n = pnp_data();
             n |= pnp_data() << 8;
         }
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n && PnpLeft > 0; i++) {
             u8 b = pnp_data();
             if (i < sizeof(d))
                 d[i] = b;
@@ -1622,11 +1711,11 @@ pnp_card(int csn, u8 *id, u16 *irqs, u8 *dmas, u16 (*used)[2], int *nused)
         if (done || (tag & 0xf8) == 0x10) {     // end of the current logical device
             if (ldn >= 0 && !mem) {
                 u16 io[8] = { 0 };
-                u8 irq[2] = { 0, 0 }, dma[2] = { 4, 4 };
+                u8 iolen[8] = { 0 }, irq[2] = { 0, 0 }, dma[2] = { 4, 4 };
                 u16 saved_irqs = *irqs, saved_used = *nused;
                 u8 saved_dmas = *dmas;
                 for (alt = nalt ? 1 : 0; alt <= nalt; alt++) {
-                    if (pnp_assign(items, count, alt, irqs, dmas, used, nused, io, irq, dma))
+                    if (pnp_assign(items, count, alt, irqs, dmas, used, nused, io, iolen, irq, dma))
                         break;
                     *irqs = saved_irqs, *dmas = saved_dmas, *nused = saved_used;
                 }
@@ -1642,6 +1731,7 @@ pnp_card(int csn, u8 *id, u16 *irqs, u8 *dmas, u16 (*used)[2], int *nused)
                             PnpIrq[irq[i]] = "ISA PnP card";
                     }
                     pnp_write(0x30, 1);
+                    pnp_isa_ldev(csn, id, io, iolen, irq, dma);
                     n = strlen(line);
                     if (io[0] && n < 40)
                         snprintf(line + n, sizeof(PnpCard[0]) - n, " %x", io[0]);
@@ -1728,49 +1818,67 @@ setup_isapnp(void)
         pnp_card(csn, id, &irqs, &dmas, used, &nused);
         pnp_write(0x03, 0);
     }
+    IsaCsns = csn - 1;
     pnp_write(0x02, 0x02);                      // all cards back to Wait for Key
+}
+
+// POST, at the end: the PnP BIOS system device nodes and the ESCD of what the POST configured.
+void
+setup_pnp(void)
+{
+    pnp_finish(IsaCsns, PNP_READ, Setting[NB_FDC] | Setting[NB_IDE_PRIMARY] << 1 | Setting[NB_IDE_SECONDARY] << 2
+               | (Setting[NB_LPT] ? Setting[NB_LPT_MODE] : 0) << 3);
 }
 
 static const struct {
     const char *title;
     void (*draw)(void);
+    int own;                                    // graphics benchmark: draws itself, until ESC
 } InfoPages[] = {
     { "CPU, CACHE AND MEMORY", info_cpu },
     { "PCI DEVICES", info_pci },
+    { "USB DEVICES", info_usb },
     { "ISA RESOURCES AND IRQ MAP", info_isa },
     { "IDE DRIVES", info_ide },
     { "CHIPSET REGISTERS", info_chipset },
-    { "MEMORY READ SPEED", info_speed },
+    { "MEMORY SPEED", info_bench_memory, 1 },
+    { "CPU BENCHMARK", info_bench_cpu, 1 },
+    { "HARD DISK BENCHMARK", info_bench_disk, 1 },
+    { "HARD DISK SPEED", info_bench_disk_bars, 1 },
 };
 
+// One page until ESC.
 static void
-info_run(int first, int last)
+info_page(int p)
 {
-    int p = first, shown = -1;
-    for (;;) {
-        char title[48];
-        if (p != shown) {                       // drawn once per page (the chart switches video modes)
-            chart_end();
-            if (first == last)
-                snprintf(title, sizeof(title), "%s", InfoPages[p].title);
-            else
-                snprintf(title, sizeof(title), "%s (%d/%d)", InfoPages[p].title, p - first + 1,
-                         last - first + 1);
-            scr_header(title);
-            InfoPages[p].draw();
-            scr_puts(ROW_HELP, 2, AttrText, first == last ? "ESC : Back"
-                     : "ESC : Back                PU/PD : Previous/Next Page");
-            shown = p;
-        }
-        int key = get_keystroke(1000);
-        if (key == 0x01)
-            break;
-        if (key == 0x49 && p > first)
-            p--;
-        if (key == 0x51 && p < last)
-            p++;
+    if (InfoPages[p].own) {
+        InfoPages[p].draw();
+        return;
     }
-    chart_end();
+    scr_header(InfoPages[p].title);
+    InfoPages[p].draw();
+    scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
+    while (get_keystroke(1000) != 0x01)
+        ;
+}
+
+// HARDWARE INFORMATION: a menu of the pages.
+static void
+info_menu(void)
+{
+    int sel = 0, n = ARRAY_SIZE(InfoPages);
+    for (;;) {
+        scr_header("HARDWARE INFORMATION");
+        for (int i = 0; i < n; i++)
+            scr_puts(4 + i, 26, i == sel ? AttrSelect : AttrText, InfoPages[i].title);
+        scr_puts(ROW_HELP, 2, AttrText, "ESC : Back      \x18\x19 : Select Page      Enter : Show");
+        switch (get_keystroke(1000)) {
+        case 0x01: return;
+        case 0x48: sel = (sel + n - 1) % n; break;
+        case 0x50: sel = (sel + 1) % n; break;
+        case 0x1c: info_page(sel); break;
+        }
+    }
 }
 
 
@@ -1864,7 +1972,7 @@ setup_boot_password(void)
  * Main menu
  ****************************************************************/
 
-enum { M_PAGE, M_INFO, M_PASSWORD, M_IDE, M_MEMTEST, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
+enum { M_PAGE, M_INFO, M_PASSWORD, M_IDE, M_MEMTEST, M_CACHETEST, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
 
 static const struct {
     u8 kind, arg;
@@ -1880,13 +1988,16 @@ static const struct {
     { M_PASSWORD, 0, "SUPERVISOR PASSWORD", "Change, Set, or Disable Password" },
     { M_IDE, 0, "IDE HDD AUTO DETECTION", "Drives found at this boot" },
     { M_MEMTEST, 0, "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM" },
+    { M_CACHETEST, 0, "CACHE TEST", "L2 cache: each write policy, timing and tag width" },
     { M_BIOS_DEFAULTS, 0, "LOAD BIOS DEFAULTS", "Load BIOS Defaults except Standard CMOS SETUP" },
     { M_DEFAULTS, 0, "LOAD SETUP DEFAULTS", "Load SETUP Defaults except Standard CMOS SETUP" },
     { M_SAVE, 0, "SAVE & EXIT SETUP", "Save Data to CMOS & Exit SETUP" },
     { M_QUIT, 0, "EXIT WITHOUT SAVING", "Abandon all Data & Exit SETUP" },
 };
 
-#define MENU_ROWS 7
+#define MENU_ROWS 8
+
+static void l2_test_run(void);
 
 static void
 save_and_reboot(void)
@@ -1931,6 +2042,10 @@ setup_menu(void)
         case 0x50: sel = (sel + 1) % n; break;
         case 0x4b: case 0x4d: sel = (sel + MENU_ROWS) % n; break;
         case 0x44: save_and_reboot(); break;
+        case 0x42:                                               // F8: leave without saving, boot menu
+            SetupBootMenu = 1;
+            scr_close();
+            return;
         case 0x01:
             if (scr_confirm("Quit Without Saving (Y/N)? ")) {
                 scr_close();
@@ -1940,9 +2055,10 @@ setup_menu(void)
         case 0x1c:
             switch (Menu[sel].kind) {
             case M_PAGE: page_run(&Pages[Menu[sel].arg]); break;
-            case M_INFO: info_run(0, ARRAY_SIZE(InfoPages) - 1); break;
-            case M_IDE: info_run(3, 3); break;
+            case M_INFO: info_menu(); break;
+            case M_IDE: info_page(4); break;
             case M_MEMTEST: mt_run(); break;
+            case M_CACHETEST: l2_test_run(); break;
             case M_PASSWORD: password_set(); break;
             case M_BIOS_DEFAULTS:
                 if (scr_confirm("Load BIOS Defaults (Y/N)? "))
@@ -1980,7 +2096,7 @@ cursor_row(int row)
  * POST screen
  ****************************************************************/
 
-int SetupRequested;
+int SetupRequested, SetupBootMenu;
 
 #define ROW_CPU    4
 #define ROW_MEMORY 5
@@ -2037,10 +2153,28 @@ setup_post_banner(void)
     else
         snprintf(line, sizeof(line), "%s CPU", name);
     scr_puts(ROW_CPU, 0, AttrText, line);
-    u32 l2 = l2_size_kb();
-    snprintf(line, sizeof(line), l2 ? "External Cache : %dK installed" : "External Cache : none", l2);
-    scr_puts(ROW_CACHE, 0, AttrText, line);
+    setup_l2_post_line();
     cursor_row(ROW_TTY);                    // teletype output continues below
+}
+
+// The POST screen's L2 line: what the L2 init did (it runs after the banner), or why the L2 is off.
+void
+setup_l2_post_line(void)
+{
+    char line[80];
+    u8 found = rtc_read(NB_CMOS_L2) & 0x0f, hb50 = pci_config_readb(HB_BDF, 0x50);
+    u32 kb = (found & 7) && (found & 7) <= 5 ? 32 << (found & 7) : 0;
+    if (L2Status == L2_OK)
+        snprintf(line, sizeof(line), "External Cache : %dK, %s", kb, hb50 & 0x40 ? "write-back" : "write-through");
+    else if (L2Status == L2_NOT_RUN)
+        snprintf(line, sizeof(line), kb ? "External Cache : %dK found" : "External Cache : none", kb);
+    else if (L2Status == L2_HUNG && L2HungStep)
+        snprintf(line, sizeof(line), "External Cache : %dK OFF, last init stopped at %s", kb, L2StepNames[L2HungStep]);
+    else
+        snprintf(line, sizeof(line), kb ? "External Cache : %dK OFF, %s" : "External Cache : none", kb,
+                 L2Names[L2Status]);
+    scr_fill(ROW_CACHE, 0, 80, AttrText, ' ');
+    scr_puts(ROW_CACHE, 0, AttrText, line);
 }
 
 // Award-style "Detecting HDD" line of an onboard IDE position at POST: shown when its detection
@@ -2068,13 +2202,15 @@ memtest_key(void)
     return scan == 0x01;
 }
 
-// Test one 4 KiB block without losing its contents (POST data lives in this RAM): two patterns,
-// each written, flushed from the cache and read back.
+// Test the dwords 'step' apart in one 4 KiB block without losing them (POST data lives in this RAM):
+// two patterns, each written, flushed from the internal cache and read back. This runs before the L2 is
+// enabled (setup_l2_cache), as by the original BIOS: on this chipset a flush also empties the L2.
 static int
 memtest_block(u32 *block, u32 *save, int step)
 {
     int i, bad = 0, n = 1024;
-    memcpy(save, block, 4096);
+    for (i = 0; i < n; i += step)
+        save[i] = block[i];
     for (i = 0; i < n; i += step)
         block[i] = (u32)&block[i] ^ 0x5aa5a55a;
     wbinvd();
@@ -2085,7 +2221,8 @@ memtest_block(u32 *block, u32 *save, int step)
     wbinvd();
     for (i = 0; i < n; i += step)
         bad |= block[i] != ~((u32)&block[i] ^ 0x5aa5a55a);
-    memcpy(block, save, 4096);
+    for (i = 0; i < n; i += step)
+        block[i] = save[i];
     return bad;
 }
 
@@ -2185,6 +2322,431 @@ read_speed_measure(void)
         SpeedMBs[i] = speed_block(i) <= ext_mem_kb() * 1024 ? read_speed(speed_block(i)) : 0;
 }
 
+// External cache enabled like the original BIOS at POST 52h: coreboot only sized it and left it off.
+// The tag RAM has no valid bits, so with L1 and the BIOS segment out of the caches, reading every
+// dword of 8 L2 sizes of DRAM fills every line; this runs from the F segment and uses no memory
+// while enabling L2 and filling.
+void VISIBLE32FLAT
+l2_fill(u32 base, u32 dwords, u8 hb50)
+{
+    asm volatile("movl $0x80008050, %%eax\n"
+                 "movw $0xcf8, %%dx\n"
+                 "outl %%eax, %%dx\n"
+                 "movw $0xcfc, %%dx\n"
+                 "movb %%bl, %%al\n"
+                 "outb %%al, %%dx\n"
+                 "cld\n"
+                 "rep lodsl\n"
+                 : "+S"(base), "+c"(dwords) : "b"(hb50) : "eax", "edx", "memory");
+}
+
+// The L2 turned fully off (50h = hb50 & 30h) after reading DRAM over the same range as l2_fill: in write-back
+// every dirty line is evicted to DRAM first, with no memory write in between that could be left in the L2.
+void VISIBLE32FLAT
+l2_fill_off(u32 base, u32 dwords, u8 hb50)
+{
+    asm volatile("cld\n"
+                 "rep lodsl\n"
+                 "movl $0x80008050, %%eax\n"
+                 "movw $0xcf8, %%dx\n"
+                 "outl %%eax, %%dx\n"
+                 "movw $0xcfc, %%dx\n"
+                 "movb %%bl, %%al\n"
+                 "andb $0x30, %%al\n"
+                 "outb %%al, %%dx\n"
+                 : "+S"(base), "+c"(dwords) : "b"(hb50) : "eax", "edx", "memory");
+}
+
+// The checks toggle 50h bit 7 with no stack or memory access in between other than the tested lines:
+// the L2 does not follow writes made while it is off, so a stack slot written then would be read back
+// stale once it is on again (a wrong return address). Port CF8h/CFCh are written directly.
+#define L2_HB50(on) "movl $0x80008050, %%eax\n movw $0xcf8, %%dx\n outl %%eax, %%dx\n movw $0xcfc, %%dx\n" \
+                    "movb %%bl, %%al\n" on "outb %%al, %%dx\n"
+
+u32 L2Saved VARFSEG;   // the tested dword: in the F segment, which is not cached during the checks
+u32 L2Got[2] VARFSEG;  // what the checks read with the L2 on, for the CACHE TEST log
+
+// With L2 off a DRAM dword is written, with it on it must read back twice: a stale tag hits falsely, a
+// line not filled from DRAM fails the second read; the dword is restored and its line evicted.
+u32 VISIBLE32FLAT
+l2_line_works(u32 addr, u32 size, u8 hb50)
+{
+    u32 works;
+    asm volatile(L2_HB50("andb $0x7f, %%al\n")
+                 "movl (%%esi), %%eax\n movl %%eax, %4\n"
+                 "movl %%esi, %%edi\n xorl $0x5aa5c33c, %%edi\n movl %%edi, (%%esi)\n"
+                 L2_HB50("")
+                 "movl %%esi, %%eax\n xorl %%ecx, %%eax\n movl (%%eax), %%eax\n"
+                 "movl (%%esi), %%eax\n movl %%eax, %5\n cmpl %%eax, %%edi\n jne 1f\n"
+                 "movl (%%esi), %%eax\n movl %%eax, %6\n cmpl %%eax, %%edi\n jne 1f\n movl $1, %%edi\n jmp 2f\n"
+                 "1: xorl %%edi, %%edi\n 2:\n"
+                 L2_HB50("andb $0x7f, %%al\n")
+                 "movl %4, %%eax\n movl %%eax, (%%esi)\n"
+                 L2_HB50("")
+                 "movl %%esi, %%eax\n xorl %%ecx, %%eax\n movl (%%eax), %%eax\n"
+                 : "=D"(works), "+S"(addr), "+c"(size), "+b"(hb50), "=m"(L2Saved), "=m"(L2Got[0]), "=m"(L2Got[1])
+                 : : "eax", "edx", "memory");
+    return works;
+}
+
+// With L2 on a line is read, its DRAM changed with L2 off: reading it again must give the cached value,
+// else the tags are not stored (fake or missing tag RAM). DRAM is restored and the line evicted.
+u32 VISIBLE32FLAT
+l2_caches(u32 addr, u32 size, u8 hb50)
+{
+    u32 cached;
+    asm volatile("movl (%%esi), %%eax\n movl %%eax, %4\n movl (%%esi), %%eax\n"
+                 L2_HB50("andb $0x7f, %%al\n")
+                 "movl %4, %%edi\n notl %%edi\n movl %%edi, (%%esi)\n"
+                 L2_HB50("")
+                 "movl (%%esi), %%edx\n movl %%edx, %5\n"
+                 "movl %4, %%eax\n xorl %%edi, %%edi\n cmpl %%edx, %%eax\n jne 1f\n incl %%edi\n 1:\n"
+                 L2_HB50("andb $0x7f, %%al\n")
+                 "movl %4, %%eax\n movl %%eax, (%%esi)\n"
+                 L2_HB50("")
+                 "movl %%esi, %%eax\n xorl %%ecx, %%eax\n movl (%%eax), %%eax\n"
+                 : "=D"(cached), "+S"(addr), "+c"(size), "+b"(hb50), "+m"(L2Saved), "=m"(L2Got[0])
+                 : : "eax", "edx", "memory");
+    return cached;
+}
+
+
+static u32
+l2_size(u8 hb50)
+{
+    return (hb50 & 7) && (hb50 & 7) <= 5 ? 0x8000 << (hb50 & 7) : 0;
+}
+
+// Scratch DRAM that l2_fill reads for an L2 of 'size': [base, end).
+static u32
+l2_scratch(u32 size, u32 *end)
+{
+    u32 base = size >= 256*1024 ? 1024*1024 : 0;
+    *end = base + 8*size < LegacyRamSize ? base + 8*size : LegacyRamSize;
+    return base;
+}
+
+static int L2Log;       // CACHE TEST step log on: its next row
+
+#define L2_LOG_TOP 3
+#define L2_LOG_END (ROW_HELP - 1)
+
+static void
+l2_log(const char *text)
+{
+    if (!L2Log)
+        return;
+    if (L2Log > L2_LOG_END) {                   // full: start again at the top
+        for (int r = L2_LOG_TOP; r <= L2_LOG_END; r++)
+            scr_fill(r, 0, 80, AttrText, ' ');
+        L2Log = L2_LOG_TOP;
+    }
+    info_line(L2Log++, text);
+    msleep(1000);
+}
+
+static void
+l2_step(int step, const char *text)
+{
+    rtc_write(NB_CMOS_L2, (rtc_read(NB_CMOS_L2) & 0x8f) | step << 4);
+    if (L2Log) {
+        char line[80];
+        snprintf(line, sizeof(line), "Step %d %s: %s", step, L2StepNames[step], text);
+        l2_log(line);
+    }
+}
+
+// Host bridge 50h-5Fh, CR0, CMOS 3Eh in the log.
+static void
+l2_log_regs(const char *when)
+{
+    char line[80];
+    int n = snprintf(line, sizeof(line), "%s 50h:", when);
+    for (int r = 0x50; r < 0x60; r++)
+        n += snprintf(line + n, sizeof(line) - n, " %02x", pci_config_readb(HB_BDF, r));
+    snprintf(line + n, sizeof(line) - n, " CR0 %x 3Eh %02x", cr0_read(), rtc_read(NB_CMOS_L2));
+    l2_log(line);
+}
+
+// One fill pass (l2_fill), in L2-size blocks with the progress logged.
+static void
+l2_fill_logged(u32 base, u32 end, u32 size, u8 hb50)
+{
+    char line[80];
+    if (!L2Log) {
+        l2_fill(base, (end - base) / 4, hb50);
+        return;
+    }
+    for (u32 a = base; a < end; a += size) {
+        u32 n = end - a < size ? end - a : size;
+        snprintf(line, sizeof(line), "  50h=%02x reading %08x-%08x (%d/%d)", hb50, a, a + n - 1,
+                 (a - base) / size + 1, (end - base + size - 1) / size);
+        l2_log(line);
+        l2_fill(a, n / 4, hb50);
+    }
+}
+
+#define L2_SAMPLES 16
+
+// DRAM dwords across the scratch range: read with the L2 off, then through it; the differences are logged.
+static void
+l2_samples(u32 base, u32 end, u32 *dram, int through_l2)
+{
+    u32 step = (end - base) / L2_SAMPLES, bad = 0, first = 0, got = 0, want = 0;
+    char line[80];
+    if (!L2Log)
+        return;
+    for (int i = 0; i < L2_SAMPLES; i++) {
+        u32 addr = base + step * i + 0x40, val = readl((void *)addr);
+        if (!through_l2)
+            dram[i] = val;
+        else if (val != dram[i] && !bad++) {
+            first = addr;
+            got = val;
+            want = dram[i];
+        }
+    }
+    if (!through_l2)
+        return;
+    if (!bad)
+        snprintf(line, sizeof(line), "  %d DRAM samples read through the L2: all equal", L2_SAMPLES);
+    else
+        snprintf(line, sizeof(line), "  through the L2 %d of %d samples differ, first %08x: %08x, DRAM %08x",
+                 bad, L2_SAMPLES, first, got, want);
+    l2_log(line);
+}
+
+// One tag check, logged with what it read.
+static int
+l2_check(int caches, u32 addr, u32 size, u8 hb50)
+{
+    char line[80];
+    L2Got[0] = L2Got[1] = 0xdeadbeef;
+    int ok = caches ? l2_caches(addr, size, hb50) : l2_line_works(addr, size, hb50);
+    if (caches)
+        snprintf(line, sizeof(line), "  cached at %08x: read %08x, want %08x: %s", addr, L2Got[0],
+                 L2Saved, ok ? "ok" : "FAIL");
+    else
+        snprintf(line, sizeof(line), "  line at %08x: read %08x %08x, want %08x: %s", addr, L2Got[0], L2Got[1],
+                 addr ^ 0x5aa5c33c, ok ? "ok" : "FAIL");
+    l2_log(line);
+    return ok;
+}
+
+// The L2 enabled as hb50 says (size, banks, timing, write policy) with 51h bit 0 = tag8 (8 tag bits, else 7):
+// an L2 status; the L2 is left on when L2_OK, else fully off.
+static int
+l2_enable(u8 hb50, int tag8)
+{
+    u8 hb55 = pci_config_readb(HB_BDF, 0x55), hb51 = pci_config_readb(HB_BDF, 0x51);
+    u32 size = l2_size(hb50), end, base = l2_scratch(size, &end);
+    u32 cacheable = size << (tag8 ? 8 : 7);
+    u32 dram_top = ALIGN(LegacyRamSize, 1024*1024);   // above the reserved CBMEM
+    if (cacheable > dram_top)
+        cacheable = dram_top;
+    u32 tag_max = cacheable / size - 1, samples[L2_SAMPLES];
+    char line[80];
+    int status;
+    if (L2Log) {
+        snprintf(line, sizeof(line), "L2 %dK, scratch %08x-%08x, tags 0-%d, code %08x, stack %08x", size >> 10,
+                 base, end - 1, tag_max, (u32)l2_enable, getesp());
+        l2_log(line);
+        l2_log_regs("before");
+    }
+    pci_config_writeb(HB_BDF, 0x51, (hb51 & ~1) | !!tag8);
+    u32 cr0 = cr0_read();
+    snprintf(line, sizeof(line), "55h %02x->%02x, CR0 %x->%x", hb55, hb55 & ~0x21, cr0, cr0 | CR0_CD | CR0_NW);
+    l2_step(L2S_CACHES_OFF, line);
+    pci_config_writeb(HB_BDF, 0x55, hb55 & ~0x21);
+    cr0_write(cr0 | CR0_CD | CR0_NW);
+    wbinvd();
+    l2_samples(base, end, samples, 0);
+    // Two passes over the same scratch range, as the original BIOS: write-through first gives every line a
+    // tag in it; write-back then clears the dirty bits, and a line still dirty from power-on is written
+    // back into that same range instead of over live memory.
+    u8 wt = (hb50 & ~0x40) | 0x80;
+    l2_step(L2S_FILL_WT, "every line given a tag");
+    l2_fill_logged(base, end, size, wt);
+    l2_samples(base, end, samples, 1);
+    // checked while still write-through: a broken tag RAM would write garbage back once write-back is on
+    l2_step(L2S_CHECKS, "tag 0, mixed, max; caching");
+    status = !l2_check(0, 0x100, size, wt) ? L2_TAG0
+        : !l2_check(0, (tag_max & 0x55) * size + 0x100, size, wt) ? L2_TAGMIX
+        : !l2_check(0, tag_max * size + 0x100, size, wt) ? L2_TAGMAX
+        : !l2_check(1, 0x100, size, wt) ? L2_NOCACHE : L2_OK;
+    if (status == L2_OK) {
+        l2_step(L2S_FILL_WB, hb50 & 0x40 ? "write-back on" : "write-through kept");
+        l2_fill_logged(base, end, size, hb50 | 0x80);
+    } else
+        pci_config_writeb(HB_BDF, 0x50, hb50 & 0x30);   // fully off (no size): the state the board booted in
+    l2_step(L2S_RESTORE, status == L2_OK ? "L2 on" : L2Names[status]);
+    pci_config_writeb(HB_BDF, 0x55, hb55);
+    wbinvd();
+    cr0_write(cr0);
+    if (L2Log)
+        l2_log_regs("after ");
+    return status;
+}
+
+// The L2 off again after l2_enable, its dirty lines written back first.
+static void
+l2_disable(u8 hb50)
+{
+    u32 end, base = l2_scratch(l2_size(hb50), &end);
+    u8 hb55 = pci_config_readb(HB_BDF, 0x55);
+    u32 cr0 = cr0_read();
+    l2_step(L2S_DISABLE, "read the scratch range, then 50h off");
+    pci_config_writeb(HB_BDF, 0x55, hb55 & ~0x21);
+    cr0_write(cr0 | CR0_CD | CR0_NW);
+    wbinvd();
+    l2_fill_off(base, (end - base) / 4, pci_config_readb(HB_BDF, 0x50));
+    pci_config_writeb(HB_BDF, 0x55, hb55);
+    wbinvd();
+    cr0_write(cr0);
+    if (L2Log)
+        l2_log_regs("off   ");
+}
+
+static u8 L2PostHb50;   // what the POST enabled (0: none), for the CACHE TEST page to restore
+
+void
+setup_l2_cache(void)
+{
+    u8 found = rtc_read(NB_CMOS_L2);
+    u8 hb50 = (pci_config_readb(HB_BDF, 0x50) & 0xf0) | (found & 0x0f);
+    u32 size = l2_size(hb50), end, base = l2_scratch(size, &end);
+    L2Status = !size ? L2_NONE : !Setting[NB_L2_CACHE] ? L2_SETUP_OFF : end < base + 2*size ? L2_RAM_SMALL
+        : (!SetupDefaulted && (found & 0x80)) ? L2_HUNG : L2_NOT_RUN;
+    if (found & 0x80)
+        L2HungStep = (found >> 4) & 7;
+    rtc_write(NB_CMOS_L2, found & 0x0f);
+    if (L2Status != L2_NOT_RUN)
+        return;
+    rtc_write(NB_CMOS_L2, found | 0x80);    // cleared below; still set at the next POST if this hangs
+    L2Status = l2_enable(hb50 | 0x40, pci_config_readb(HB_BDF, 0x51) & 1);   // write-back, as the original
+    L2PostHb50 = L2Status == L2_OK ? hb50 | 0x40 : 0;
+    rtc_write(NB_CMOS_L2, found & 0x0f);
+}
+
+// CACHE TEST: the POST's L2 init (l2_enable) with each write policy, timing (50h bits 5-4) and tag width on the
+// size the POST found. Enter runs the selected one step by step, each step and its values on screen for 1 s
+// (a photo of the last screen shows where it hangs); A runs all of them quickly. For each that works, the read
+// speed inside the L2 and from DRAM. If one hangs or resets the board, the next POST leaves the L2 off once and
+// shows the step.
+static void
+put_at(char *line, int col, const char *text)
+{
+    memcpy(line + col, text, strlen(text));
+}
+
+static u8
+l2_variant(u8 found, int v)
+{
+    return found | (v & 6) << 3 | (v & 8 ? 0x40 : 0);   // v: bit 0 tag8, bits 2-1 timing, bit 3 write-back
+}
+
+// One variant: result and speeds into its row text.
+static void
+l2_variant_run(u8 found, int v, char *line)
+{
+    u32 size = l2_size(found);
+    char field[24], text[80];
+    rtc_write(NB_CMOS_L2, found | 0x80);
+    int status = l2_enable(l2_variant(found, v), v & 1);
+    memset(line + 21, ' ', 55);
+    put_at(line, 21, status == L2_OK ? "works" : L2Names[status]);
+    if (status == L2_OK) {
+        l2_step(L2S_SPEED, "inside the L2, then from DRAM");
+        u16 in_l2 = read_speed(size / 2), dram = read_speed(size * 4);
+        snprintf(text, sizeof(text), "  %d MB/s in the L2, %d MB/s from DRAM", in_l2, dram);
+        l2_log(text);
+        l2_disable(l2_variant(found, v));
+        snprintf(field, sizeof(field), "%d", in_l2);
+        put_at(line, 53, field);
+        snprintf(field, sizeof(field), "%d", dram);
+        put_at(line, 62, field);
+    }
+    rtc_write(NB_CMOS_L2, found);
+}
+
+static void
+l2_test_run(void)
+{
+    u8 found = rtc_read(NB_CMOS_L2) & 0x0f, hb51 = pci_config_readb(HB_BDF, 0x51);
+    u32 size = l2_size(found);
+    char rows[16][80], line[80];
+    int sel = (pci_config_readb(HB_BDF, 0x50) & 0x30) >> 3 | 8 | (hb51 & 1);   // the POST's: write-back
+    if (!size) {
+        scr_header("CACHE TEST");
+        scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
+        info_line(3, "No L2 cache found at POST");
+        while (get_keystroke(1000) != 0x01)
+            ;
+        return;
+    }
+    for (int v = 0; v < 16; v++) {
+        memset(rows[v], ' ', 76);
+        rows[v][76] = 0;
+        put_at(rows[v], 0, v & 8 ? "WB" : "WT");
+        snprintf(line, sizeof(line), "%d", (v >> 1) & 3);
+        put_at(rows[v], 8, line);
+        put_at(rows[v], 16, v & 1 ? "8" : "7+1");
+        put_at(rows[v], 21, "-");
+    }
+    if (L2PostHb50) {
+        rtc_write(NB_CMOS_L2, found | 0x80);
+        l2_disable(L2PostHb50);
+        rtc_write(NB_CMOS_L2, found);
+    }
+    for (;;) {
+        scr_header("CACHE TEST");
+        if (L2HungStep)
+            snprintf(line, sizeof(line), "L2 %dK, %d bank(s); the last L2 init stopped at step %d: %s", size >> 10,
+                     found & 8 ? 2 : 1, L2HungStep, L2StepNames[L2HungStep]);
+        else
+            snprintf(line, sizeof(line), "L2 found at POST: %dK, %d bank(s); POST setting 50h=%x", size >> 10,
+                     found & 8 ? 2 : 1, L2PostHb50);
+        info_line(3, line);
+        info_line(4, "Policy  Timing  Tag  Result                          L2 MB/s  DRAM MB/s");
+        for (int v = 0; v < 16; v++)
+            scr_puts(5 + v, 3, v == sel ? AttrSelect : AttrText, rows[v]);
+        scr_puts(ROW_HELP, 2, AttrText, "ESC : Back   \x18\x19 : Select   Enter : Run step by step   A : Run all");
+        int key = get_keystroke(1000);
+        if (key == 0x01)
+            break;
+        if (key == 0x48)
+            sel = (sel + 15) % 16;
+        if (key == 0x50)
+            sel = (sel + 1) % 16;
+        if (key == 0x1c) {
+            snprintf(line, sizeof(line), "CACHE TEST: %s, timing %d, tag %s", sel & 8 ? "WB" : "WT", (sel >> 1) & 3,
+                     sel & 1 ? "8" : "7+1");
+            scr_header(line);
+            L2Log = L2_LOG_TOP;
+            l2_variant_run(found, sel, rows[sel]);
+            l2_log(rows[sel] + 21);
+            L2Log = 0;
+            scr_puts(ROW_HELP, 2, AttrText, "Done, press a key");
+            while (get_keystroke(1000) < 0)
+                ;
+        }
+        if (key == 0x1e) {
+            for (int v = 0; v < 16; v++) {
+                put_at(rows[v], 21, "testing...");
+                scr_puts(5 + v, 3, AttrText, rows[v]);
+                l2_variant_run(found, v, rows[v]);
+                scr_puts(5 + v, 3, AttrText, rows[v]);
+            }
+        }
+    }
+    pci_config_writeb(HB_BDF, 0x51, hb51);
+    if (L2PostHb50) {
+        rtc_write(NB_CMOS_L2, found | 0x80);
+        l2_enable(L2PostHb50, hb51 & 1);
+        rtc_write(NB_CMOS_L2, found);
+    }
+}
+
 void
 setup_memtest(void)
 {
@@ -2192,60 +2754,78 @@ setup_memtest(void)
         memtest();
 }
 
-// Line chart of SpeedMBs (SysSpeed style): a 512x160-dot bitmap shown as redefined characters in
-// 8-dot cells, so that they join without the 9th-dot gap.
-#define CHART_COLS   64
-#define CHART_ROWS   10
-#define CHART_W      (CHART_COLS * 8)
-#define CHART_H      (CHART_ROWS * 16)
-#define CHART_GLYPH0 0x80                   // characters 0x80-0xff are redefined
-#define CHART_ROW    4
-#define CHART_COL    8
-static int ChartMode;                       // 8-dot cells and redefined characters: chart_end() restores
+/****************************************************************
+ * Benchmarks (SpeedSys style), VGA mode 12h: 640x480, 16 colors, 80x30 text cells
+ ****************************************************************/
 
-// 25.175 MHz dot clock and 8-dot cells: the same 31.5 kHz / 70 Hz signal as the 9-dot text mode.
+enum { C_BLACK, C_BLUE, C_GREEN, C_CYAN, C_RED, C_MAGENTA, C_BROWN, C_GRAY, C_DGRAY, C_LBLUE, C_LGREEN, C_LCYAN,
+       C_LRED, C_LMAGENTA, C_YELLOW, C_WHITE };
+#define GFX ((volatile u8 *)0xa0000)
+
 static void
-text_8dot(void)
+gfx_reg(u8 index, u8 val)
 {
-    outb(0x00, 0x3c4);
-    outb(0x01, 0x3c5);                      // sequencer synchronous reset
-    outb(inb(0x3cc) & ~0x0c, 0x3c2);        // 25.175 MHz
-    outb(0x01, 0x3c4);
-    outb(inb(0x3c5) | 0x01, 0x3c5);         // 8 dots per character
-    outb(0x00, 0x3c4);
-    outb(0x03, 0x3c5);
-    inb(0x3da);
-    outb(0x33, 0x3c0);                      // horizontal panning 0 for 8-dot cells
-    outb(0x00, 0x3c0);
+    outb(index, 0x3ce);
+    outb(val, 0x3cf);
+}
+
+// Mode 12h with writes through set/reset (each write paints the bit mask's pixels in the color): 0 without VGA.
+static int
+gfx_open(void)
+{
+    int10(0x0012, 0);
+    return GET_BDA(video_mode) == 0x12;
 }
 
 static void
-chart_end(void)
+gfx_span(int x0, int x1, int y, u8 color)       // pixels x0..x1 of row y
 {
-    if (ChartMode)
-        scr_open();                         // mode set: 9-dot cells, ROM font
-    ChartMode = 0;
+    outb(0x02, 0x3c4);                          // the video BIOS's text output changes these: set again
+    outb(0x0f, 0x3c5);                          // all planes
+    gfx_reg(1, 0x0f);                           // set/reset on all planes: the color comes from register 0
+    gfx_reg(3, 0x00);
+    gfx_reg(5, 0x00);                           // write mode 0
+    gfx_reg(0, color);
+    for (int x = x0; x <= x1; ) {
+        int bits = 8 - (x & 7), n = x1 - x + 1 < bits ? x1 - x + 1 : bits;
+        volatile u8 *p = GFX + y * 80 + x / 8;
+        gfx_reg(8, (0xff >> (x & 7)) & ~(0xff >> ((x & 7) + n)));
+        (void)*p;                               // load the latches
+        *p = 0xff;
+        x += n;
+    }
+    gfx_reg(8, 0xff);
 }
 
 static void
-chart_dot(u8 *bmp, int x, int y)
+gfx_rect(int x0, int y0, int x1, int y1, u8 color)
 {
-    bmp[y * CHART_COLS + x / 8] |= 0x80 >> (x & 7);
+    for (int y = y0; y <= y1; y++)
+        gfx_span(x0, x1, y, color);
 }
 
-// Bresenham line, x0 <= x1.
 static void
-chart_line(u8 *bmp, int x0, int y0, int x1, int y1)
+gfx_frame(int x0, int y0, int x1, int y1, u8 color)
 {
-    int dx = x1 - x0, dy = y1 > y0 ? y1 - y0 : y0 - y1, sy = y1 > y0 ? 1 : -1, err = dx - dy;
+    gfx_span(x0, x1, y0, color);
+    gfx_span(x0, x1, y1, color);
+    gfx_rect(x0, y0, x0, y1, color);
+    gfx_rect(x1, y0, x1, y1, color);
+}
+
+static void
+gfx_line(int x0, int y0, int x1, int y1, u8 color)
+{
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x1 > x0 ? 1 : -1;
+    int dy = y1 > y0 ? y1 - y0 : y0 - y1, sy = y1 > y0 ? 1 : -1, err = dx - dy;
     for (;;) {
-        chart_dot(bmp, x0, y0);
+        gfx_span(x0, x0, y0, color);
         if (x0 == x1 && y0 == y1)
             return;
         int e2 = 2 * err;
         if (e2 > -dy) {
             err -= dy;
-            x0++;
+            x0 += sx;
         }
         if (e2 < dx) {
             err += dx;
@@ -2254,84 +2834,569 @@ chart_line(u8 *bmp, int x0, int y0, int x1, int y1)
     }
 }
 
-// Text centered on column col.
+// Text in the 8x16 cell grid, by the video BIOS (it draws the ROM font in graphics modes).
 static void
-chart_label(int row, int col, const char *s)
+gfx_text(int row, int col, u8 color, const char *s)
 {
-    scr_puts(row, col - strlen(s) / 2, AttrText, s);
-}
-
-static void
-info_speed(void)
-{
-    static const char * const size[] = {
-        "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M"
-    };
-    u8 *bmp = malloc_tmphigh(CHART_COLS * CHART_H), *font = malloc_tmplow(128 * 16);
-    char num[8];
-    int i, r, c, max = 1, glyphs = 0, x0 = -1, y0 = 0;
-    if (!bmp || !font)
-        goto done;
-    read_speed_measure();
-    for (i = 0; i < SPEED_POINTS; i++)
-        if (SpeedMBs[i] > max)
-            max = SpeedMBs[i];
-    memset(bmp, 0, CHART_COLS * CHART_H);
-    for (i = 0; i < CHART_H; i++)
-        chart_dot(bmp, 0, i);
-    for (i = 0; i < CHART_W; i++)
-        chart_dot(bmp, i, CHART_H - 1);
-    for (i = 0; i < SPEED_POINTS && SpeedMBs[i]; i++) {
-        int x = i * (CHART_W - 1) / (SPEED_POINTS - 1);
-        int y = CHART_H - 1 - SpeedMBs[i] * (CHART_H - 9) / max;
-        chart_line(bmp, x0 < 0 ? x : x0, x0 < 0 ? y : y0, x, y);
-        x0 = x;
-        y0 = y;
-    }
-    for (r = 0; r < CHART_ROWS; r++)        // cells -> characters, identical ones shared
-        for (c = 0; c < CHART_COLS; c++) {
-            u8 cell[16];
-            int line, g, used = 0;
-            for (line = 0; line < 16; line++)
-                used |= cell[line] = bmp[(r * 16 + line) * CHART_COLS + c];
-            for (g = 0; used && g < glyphs && memcmp(font + g * 16, cell, 16); g++)
-                ;
-            if (used && g == glyphs && glyphs < 128)
-                memcpy(font + glyphs++ * 16, cell, 16);
-            scr_fill(CHART_ROW + r, CHART_COL + c, 1, AttrValue,
-                     used && g < glyphs ? CHART_GLYPH0 + g : ' ');
-        }
-    if (GET_BDA(char_height) == 16) {
+    for (; *s && col < 80; s++, col++) {
         struct bregs br;
         memset(&br, 0, sizeof(br));
         br.flags = F_IF;
-        br.ax = 0x1110;                     // load user font: 16 scanlines per character
-        br.bx = 0x1000;
-        br.cx = glyphs;
-        br.dx = CHART_GLYPH0;
-        br.es = FLATPTR_TO_SEG(font);
-        br.bp = FLATPTR_TO_OFFSET(font);
-        if (GET_BDA(video_mode) == 3)
-            text_8dot();
+        br.ah = 0x02;
+        br.dh = row;
+        br.dl = col;
         call16_int(0x10, &br);
-        ChartMode = 1;
+        memset(&br, 0, sizeof(br));
+        br.flags = F_IF;
+        br.ax = 0x0900 | (u8)*s;
+        br.bl = color;
+        br.cx = 1;
+        call16_int(0x10, &br);
     }
-    scr_puts(CHART_ROW - 1, 2, AttrText, "Memory read speed (MB/s) by block size");
-    snprintf(num, sizeof(num), "%d", max);
-    scr_puts(CHART_ROW, CHART_COL - 1 - strlen(num), AttrText, num);
-    snprintf(num, sizeof(num), "%d", max / 2);
-    scr_puts(CHART_ROW + (CHART_H - 1 - (CHART_H - 9) / 2) / 16, CHART_COL - 1 - strlen(num), AttrText, num);
-    scr_puts(CHART_ROW + CHART_ROWS - 1, CHART_COL - 2, AttrText, "0");
-    for (i = 0; i < ARRAY_SIZE(size); i++) {   // block sizes and speeds at the octaves
-        int col = CHART_COL + i * 4 * (CHART_W - 1) / (SPEED_POINTS - 1) / 8;
-        chart_label(CHART_ROW + CHART_ROWS, col, size[i]);
-        snprintf(num, sizeof(num), "%d", SpeedMBs[i * 4]);
-        chart_label(CHART_ROW + CHART_ROWS + 1, col, SpeedMBs[i * 4] ? num : "-");
-    }
-done:
-    free(bmp);
-    free(font);
 }
+
+static void
+gfx_title(const char *title)
+{
+    gfx_rect(0, 0, 639, 479, C_BLUE);
+    gfx_text(0, 40 - strlen(title) / 2, C_WHITE, title);
+    gfx_text(29, 1, C_LCYAN, "ESC : Back");
+}
+
+/* Memory: read, write and move speed by block size */
+
+static u16 MemMBs[3][SPEED_POINTS];             // read, write, move
+
+static void
+write_block(u32 addr, u32 bytes)
+{
+    u32 n = bytes / 64;
+    asm volatile("1: movl %%eax, (%0); movl %%eax, 4(%0); movl %%eax, 8(%0); movl %%eax, 12(%0)\n"
+                 "movl %%eax, 16(%0); movl %%eax, 20(%0); movl %%eax, 24(%0); movl %%eax, 28(%0)\n"
+                 "movl %%eax, 32(%0); movl %%eax, 36(%0); movl %%eax, 40(%0); movl %%eax, 44(%0)\n"
+                 "movl %%eax, 48(%0); movl %%eax, 52(%0); movl %%eax, 56(%0); movl %%eax, 60(%0)\n"
+                 "addl $64, %0; decl %1; jnz 1b" : "+r"(addr), "+r"(n) : "a"(0x5aa5c33c) : "memory");
+}
+
+static void
+move_block(u32 src, u32 dst, u32 bytes)
+{
+    u32 n = bytes / 4;
+    asm volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+}
+
+// MB/s of one kind on 'block' bytes at src (and dst) for about 20 ms, after one warm-up pass; the timer is read
+// once per 64 KB or more (reading the PIT costs microseconds).
+static u16
+mem_speed(int kind, u32 src, u32 dst, u32 block)
+{
+    u32 done = 0, ticks = 0, reps = block < 0x10000 ? 0x10000 / block : 1;
+    u32 flags = save_flags();
+    irq_disable();
+    for (int pass = 0; pass < 2; pass++) {
+        u32 t0 = timer_read();
+        do {
+            for (u32 r = 0; r < reps; r++) {
+                if (kind == 0)
+                    read_block(src, block);
+                else if (kind == 1)
+                    write_block(dst, block);
+                else
+                    move_block(src, dst, block);
+            }
+            done += pass ? reps * block : 0;
+            ticks = timer_read() - t0;
+        } while (pass && ticks < TimerKHz * 20);
+    }
+    restore_flags(flags);
+    return ticks ? (done >> 10) * TimerKHz / ticks * 1024 / 1000 : 0;
+}
+
+static void
+mem_measure(void)
+{
+    u32 top = speed_block(SPEED_POINTS - 1);
+    u8 *src = malloc_tmphigh(top), *dst = malloc_tmphigh(top);
+    if (!src || !dst)
+        goto done;
+    memset(src, 0x5a, top);
+    for (int i = 0; i < SPEED_POINTS; i++)
+        for (int kind = 0; kind < 3; kind++)
+            MemMBs[kind][i] = mem_speed(kind, (u32)src, (u32)dst, speed_block(i));
+done:
+    free(src);
+    free(dst);
+}
+
+#define MCH_X0 64
+#define MCH_X1 616
+#define MCH_Y0 64
+#define MCH_Y1 384
+
+static int
+bench_memory(void)
+{
+    static const u8 colors[3] = { C_YELLOW, C_LRED, C_LGREEN };
+    static const char * const names[3] = { "Reading", "Writing", "Moving" };
+    static const char * const size[] = { "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M" };
+    char text[48];
+    int max = 1;
+    gfx_title("MEMORY SPEED");
+    gfx_text(2, 2, C_WHITE, "Measuring...");
+    if (!MemMBs[0][0])
+        mem_measure();
+    gfx_rect(16, 32, 300, 47, C_BLUE);
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < SPEED_POINTS; i++)
+            if (MemMBs[k][i] > max)
+                max = MemMBs[k][i];
+    max = (max + 49) / 50 * 50;
+    gfx_text(2, 2, C_WHITE, "Memory speed (MB/s) by block size");
+    gfx_rect(MCH_X0, MCH_Y0, MCH_X1, MCH_Y1, C_BLACK);
+    for (int g = 0; g <= 4; g++) {              // grid and MB/s scale
+        int y = MCH_Y1 - g * (MCH_Y1 - MCH_Y0) / 4;
+        gfx_span(MCH_X0, MCH_X1, y, C_DGRAY);
+        snprintf(text, sizeof(text), "%d", max * g / 4);
+        gfx_text(y / 16, MCH_X0 / 8 - 1 - strlen(text), C_WHITE, text);
+    }
+    for (int i = 0; i < ARRAY_SIZE(size); i++) {
+        int x = MCH_X0 + i * 4 * (MCH_X1 - MCH_X0) / (SPEED_POINTS - 1);
+        gfx_rect(x, MCH_Y0, x, MCH_Y1, C_DGRAY);
+        gfx_text(MCH_Y1 / 16 + 1, x / 8 - strlen(size[i]) / 2, C_WHITE, size[i]);
+    }
+    for (int k = 0; k < 3; k++) {
+        int x0 = -1, y0 = 0;
+        for (int i = 0; i < SPEED_POINTS && MemMBs[k][i]; i++) {
+            int x = MCH_X0 + i * (MCH_X1 - MCH_X0) / (SPEED_POINTS - 1);
+            int y = MCH_Y1 - MemMBs[k][i] * (MCH_Y1 - MCH_Y0) / max;
+            if (x0 >= 0)
+                gfx_line(x0, y0, x, y, colors[k]);
+            x0 = x;
+            y0 = y;
+        }
+        snprintf(text, sizeof(text), "%s: %d MB/s at 4K, %d MB/s at 2M", names[k], MemMBs[k][0],
+                 MemMBs[k][SPEED_POINTS - 1]);
+        gfx_text(26 + k, 8, colors[k], text);
+    }
+    return 0;
+}
+
+/* CPU: integer (ALU) and floating point (FPU) speed against 486-class CPUs */
+
+// Microseconds in 'ticks' timer ticks, without 64-bit arithmetic.
+static u32
+ticks_us(u32 ticks)
+{
+    return ticks / TimerKHz * 1000 + ticks % TimerKHz * 1000 / TimerKHz;
+}
+
+// Million instructions/s of 16 one-clock ALU instructions + dec/jnz (20 clocks on a 486 core) for about 30 ms.
+static u32
+cpu_alu_mips(void)
+{
+    u32 flags = save_flags(), loops = 0, ticks, t0;
+    irq_disable();
+    t0 = timer_read();
+    do {
+        u32 n = 4000;
+        asm volatile(".align 16\n1: addl %%ebx, %%eax; xorl %%ecx, %%edx; subl %%eax, %%edi; andl %%edx, %%ebx\n"
+                     "orl %%edi, %%ecx; addl %%ebx, %%eax; xorl %%ecx, %%edx; subl %%eax, %%edi\n"
+                     "andl %%edx, %%ebx; orl %%edi, %%ecx; addl %%ebx, %%eax; xorl %%ecx, %%edx\n"
+                     "subl %%eax, %%edi; andl %%edx, %%ebx; orl %%edi, %%ecx; addl %%ebx, %%eax\n"
+                     "decl %%esi; jnz 1b"
+                     : "+S"(n) : "a"(1), "b"(2), "c"(3), "d"(4), "D"(5) : "cc");
+        loops += 4000;
+        ticks = timer_read() - t0;
+    } while (ticks < TimerKHz * 30);
+    restore_flags(flags);
+    return loops * 18 / ticks_us(ticks);                // 18 instructions per loop: per us = million per s
+}
+
+// Million FPU operations/s of 4 FADD + 4 FMUL per loop for about 30 ms; 0 without FPU.
+static u32
+cpu_fpu_mflops(void)
+{
+    if (!(GET_BDA(equipment_list_flags) & 2))
+        return 0;
+    u32 flags = save_flags(), loops = 0, ticks, t0;
+    irq_disable();
+    asm volatile("fninit; fld1; fld1; fld1");
+    t0 = timer_read();
+    do {
+        u32 n = 2000;
+        asm volatile(".align 16\n1: fadd %%st(1), %%st; fmul %%st(2), %%st; fadd %%st(1), %%st; fmul %%st(2), %%st\n"
+                     "fadd %%st(1), %%st; fmul %%st(2), %%st; fadd %%st(1), %%st; fmul %%st(2), %%st\n"
+                     "decl %0; jnz 1b" : "+r"(n));
+        loops += 2000;
+        ticks = timer_read() - t0;
+    } while (ticks < TimerKHz * 30);
+    asm volatile("fninit");
+    restore_flags(flags);
+    return loops * 8 * 1000 / ticks_us(ticks);          // operations per ms = thousands per s
+}
+
+// A SpeedSys bar: this machine's value against references, labels above and below the scale.
+static void
+gfx_bar(int y, const char *title, u32 value, const char *unit, const char * const *ref_name, const u32 *ref_value,
+        int refs, int decimals)
+{
+    char text[40];
+    u32 max = value;
+    for (int r = 0; r < refs; r++)
+        if (ref_value[r] > max)
+            max = ref_value[r];
+    max += max / 10 + 1;
+    gfx_frame(16, y, 623, y + 95, C_LCYAN);
+    gfx_text(y / 16, 4, C_LCYAN, title);
+    gfx_rect(40, y + 40, 600, y + 55, C_BLACK);
+    gfx_rect(40, y + 40, 40 + value * 560 / max, y + 55, C_LBLUE);
+    for (int r = 0; r < refs; r++) {            // references alternately above and below the scale
+        int x = 40 + ref_value[r] * 560 / max, up = r & 1;
+        gfx_rect(x, up ? y + 30 : y + 56, x, up ? y + 39 : y + 64, C_WHITE);
+        int col = x / 8 - strlen(ref_name[r]) / 2;
+        gfx_text((up ? y + 16 : y + 66) / 16, col < 3 ? 3 : col, C_WHITE, ref_name[r]);
+    }
+    if (decimals)
+        snprintf(text, sizeof(text), " %d.%d %s ", value / 1000, value % 1000 / 100, unit);
+    else
+        snprintf(text, sizeof(text), " %d %s ", value, unit);
+    gfx_text((y + 40) / 16, 6, C_YELLOW, text);
+}
+
+// The 486-class CPUs (Intel and AMD cores: the same clocks per instruction, so speed scales with the core clock).
+static const char * const RefCpu[] = {
+    "486SX-25", "486DX-33", "486DX2-50", "486DX2-66", "486DX4-100", "5x86-133", "5x86-160"
+};
+static const u16 RefMhz[] = { 25, 33, 50, 66, 100, 133, 160 };
+
+static int
+bench_cpu(void)
+{
+    char vendor[13], text[80];
+    u32 fms = 0, features, refs = 0, alu, fpu, ref_alu[7], ref_fpu[7];
+    int mhz, row = 2;
+    const char *name = cpu_short_name(&mhz);
+    int known = cpu_ident(vendor, &fms, &features) && (fms >> 8 & 15) == 4
+        && (!strcmp(vendor, "GenuineIntel") || !strcmp(vendor, "AuthenticAMD"));
+    gfx_title("CPU BENCHMARK");
+    gfx_text(row, 2, C_WHITE, "Measuring...");
+    alu = cpu_alu_mips();
+    fpu = cpu_fpu_mflops();
+    gfx_rect(16, 32, 300, 47, C_BLUE);
+    snprintf(text, sizeof(text), "Processor   : %s, %d MHz (measured)", name, mhz);
+    gfx_text(row++, 2, C_WHITE, text);
+    snprintf(text, sizeof(text), "CPUID       : %s family %d model %d stepping %d", vendor, fms >> 8 & 15, fms >> 4 & 15,
+             fms & 15);
+    gfx_text(row++, 2, C_WHITE, fms ? text : "CPUID       : none (pre-CPUID 486)");
+    snprintf(text, sizeof(text), "FPU         : %s", fpu ? "integrated" : "none");
+    gfx_text(row++, 2, C_WHITE, text);
+    u8 l2 = pci_config_readb(HB_BDF, 0x50);
+    snprintf(text, sizeof(text), "L2 cache    : %s", L2Status == L2_OK ? (l2 & 0x40 ? "on, write-back" : "on, write-through")
+             : L2Names[L2Status]);
+    gfx_text(row++, 2, C_WHITE, text);
+    snprintf(text, sizeof(text), "Memory      : %d KB", 1024 + ext_mem_kb());
+    gfx_text(row++, 2, C_WHITE, text);
+    gfx_text(row++, 2, C_WHITE, "Chipset     : UMC UM8881F + UM8886BF");
+    snprintf(text, sizeof(text), "BIOS        : newBIOS %s", RELEASE_DATE);
+    gfx_text(row++, 2, C_WHITE, text);
+    if (known && mhz) {                         // references: this CPU's own speed per MHz
+        for (refs = 0; refs < ARRAY_SIZE(RefMhz); refs++) {
+            ref_alu[refs] = alu * RefMhz[refs] / mhz;
+            ref_fpu[refs] = refs ? fpu * RefMhz[refs] / mhz : 0;   // the 486SX has no FPU
+        }
+    }
+    gfx_bar(176, "Integer (ALU) speed, million instructions/s", alu, "MIPS", RefCpu, ref_alu, refs, 0);
+    if (fpu)
+        gfx_bar(288, "Floating point (FPU) speed, million operations/s", fpu, "MFLOPS", RefCpu + 1, ref_fpu + 1,
+                refs ? refs - 1 : 0, 1);
+    else
+        gfx_text(19, 4, C_LCYAN, "No FPU");
+    gfx_text(26, 2, C_GRAY, known ? "References: Intel and AMD 486-class cores run these loops in the same clocks:"
+             : "No references: this CPU's clocks per instruction differ from the 486's");
+    if (known)
+        gfx_text(27, 2, C_GRAY, "their speed is this CPU's per MHz times their clock.");
+    return 0;
+}
+
+/* Hard disks: seek times, linear read speed across the disk, interface speed */
+
+#define HD_MAX    8
+#define HD_POINTS 64
+static struct {
+    struct drive_s *drive;
+    char name[48];
+    u32 sectors;
+    int tested, error;                          // error: one of HdErrors
+    u32 err_lba;
+    u32 max_seek_us, avg_seek_us, t2t_us, buffered_kbs, avg_kbs;
+    u16 kbs[HD_POINTS], access_ms10[HD_POINTS];
+} Hd[HD_MAX];
+static int HdCount;
+enum { HD_READ_ERROR = 1, HD_SLOW, HD_ABORTED, HD_SMALL };
+static const char * const HdErrors[] = {
+    "", "Read error at LBA %d", "Too slow: a read at LBA %d took over 2 s", "Stopped (ESC)",
+    "Disk under 256 KB, or no memory"
+};
+
+static void
+hd_list(void)
+{
+    struct drive_s *drives[HD_MAX];
+    const char *descs[HD_MAX];
+    int n = boot_hd_list(drives, descs, HD_MAX);
+    for (HdCount = 0; HdCount < n; HdCount++) {
+        struct drive_s *drive = drives[HdCount];
+        memset(&Hd[HdCount], 0, sizeof(Hd[0]));
+        Hd[HdCount].drive = drive;
+        Hd[HdCount].sectors = drive->sectors > 0xffffffff ? 0xffffffff : drive->sectors;
+        snprintf(Hd[HdCount].name, sizeof(Hd[0].name), "%s", descs[HdCount] ? descs[HdCount] : "disk");
+        for (int k = 0; k < 4; k++)
+            if (IdeInfo[k].present && IdeInfo[k].drive == drive)
+                snprintf(Hd[HdCount].name, sizeof(Hd[0].name), "%s %s", k & 2 ? "Secondary" : "Primary",
+                         IdeInfo[k].model);
+    }
+}
+
+// Microseconds to read count sectors at lba into buf; -1 on an error.
+static int
+hd_read(struct drive_s *drive, u32 lba, u16 count, void *buf)
+{
+    struct disk_op_s op;
+    memset(&op, 0, sizeof(op));
+    op.drive_fl = drive;
+    op.command = CMD_READ;
+    op.lba = lba;
+    op.count = count;
+    op.buf_fl = buf;
+    u32 t0 = timer_read();
+    // process_op() runs ATA only in 16-bit mode; the driver itself works in 32-bit mode too
+    int ret = drive->type == DTYPE_ATA ? ata_process_op(&op) : process_op(&op);
+    u32 ticks = timer_read() - t0;
+    return ret ? -1 : (int)ticks_us(ticks);
+}
+
+static u32
+hd_rand(u32 *seed)
+{
+    *seed = *seed * 1103515245 + 12345;
+    return *seed >> 8;
+}
+
+// The whole test of disk h: 0, or -1 with Hd[h].error set at the first read error.
+static int
+hd_test(int h, void (*progress)(int percent))
+{
+    struct drive_s *drive = Hd[h].drive;
+    u32 n = Hd[h].sectors, seed = 0x1234567, sum, t;
+    u8 *buf = malloc_tmphigh(64 * 1024);
+    int us;
+    if (!buf || n < 512) {
+        free(buf);
+        Hd[h].error = HD_SMALL;
+        return -1;
+    }
+#define HD_TRY(expr, at) do {                                               \
+        us = (expr);                                                        \
+        if (us < 0 || us > 2000000) {                                       \
+            Hd[h].error = us < 0 ? HD_READ_ERROR : HD_SLOW;                 \
+            Hd[h].err_lba = (at);                                           \
+            goto out;                                                       \
+        }                                                                   \
+    } while (0)
+    HD_TRY(hd_read(drive, 0, 64, buf), 0);      // buffered: the same 32 KB again, from the drive's cache
+    for (sum = 0, t = 0; t < 8; t++) {
+        HD_TRY(hd_read(drive, 0, 64, buf), 0);
+        sum += us;
+    }
+    Hd[h].buffered_kbs = sum ? 8 * 32 * 1000000 / sum : 0;
+    u32 track = drive->lchs.head && drive->lchs.sector ? drive->lchs.head * drive->lchs.sector : 63;
+    if (track > n / 32)                         // a small disk: 16 steps stay inside it
+        track = n / 32;
+    for (sum = 0, t = 0; t < 16; t++) {          // track to track
+        HD_TRY(hd_read(drive, (n / 2) + t * track, 1, buf), (n / 2) + t * track);
+        sum += t ? us : 0;
+    }
+    Hd[h].t2t_us = sum / 15;
+    for (sum = 0, t = 0; t < 8; t++) {           // full stroke
+        HD_TRY(hd_read(drive, t & 1 ? n - 1 : 0, 1, buf), t & 1 ? n - 1 : 0);
+        sum += t ? us : 0;
+    }
+    Hd[h].max_seek_us = sum / 7;
+    for (sum = 0, t = 0; t < 32; t++) {          // random
+        u32 lba = hd_rand(&seed) % n;
+        HD_TRY(hd_read(drive, lba, 1, buf), lba);
+        sum += us;
+    }
+    Hd[h].avg_seek_us = sum / 32;
+    for (sum = 0, t = 0; t < HD_POINTS; t++) {   // across the disk: access time, then 64 KB read on
+        u32 lba = (n - 256) / (HD_POINTS - 1) * t + (n - 256) % (HD_POINTS - 1) * t / (HD_POINTS - 1);
+        HD_TRY(hd_read(drive, lba, 1, buf), lba);
+        Hd[h].access_ms10[t] = us / 100;
+        HD_TRY(hd_read(drive, lba + 1, 128, buf), lba + 1);
+        Hd[h].kbs[t] = us ? 64 * 1000000 / us : 0;
+        sum += Hd[h].kbs[t];
+        if (progress) {
+            progress(t * 100 / HD_POINTS);
+            if (get_keystroke(0) == 0x01) {
+                Hd[h].error = HD_ABORTED;
+                goto out;
+            }
+        }
+    }
+    Hd[h].avg_kbs = sum / HD_POINTS;
+    Hd[h].tested = 1;
+out:
+    free(buf);
+    return Hd[h].error ? -1 : 0;
+}
+
+static void
+hd_progress(int percent)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "%d%%   ", percent);
+    gfx_text(10, 60, C_WHITE, text);
+}
+
+#define HCH_X0 368
+#define HCH_X1 624
+#define HCH_Y0 192
+#define HCH_Y1 400
+
+static void
+hd_show(int h)
+{
+    char text[80];
+    u32 max = 1;
+    gfx_rect(8, 112, 631, 463, C_BLUE);
+    if (Hd[h].error) {
+        snprintf(text, sizeof(text), HdErrors[Hd[h].error], Hd[h].err_lba);
+        gfx_text(8, 2, C_LRED, text);
+        Hd[h].error = Hd[h].error == HD_ABORTED ? 0 : Hd[h].error;   // stopped: may run again
+        return;
+    }
+    snprintf(text, sizeof(text), "Maximal seek time     : %d.%02d ms", Hd[h].max_seek_us / 1000,
+             Hd[h].max_seek_us % 1000 / 10);
+    gfx_text(8, 2, C_LRED, text);
+    snprintf(text, sizeof(text), "Average (random) seek : %d.%02d ms", Hd[h].avg_seek_us / 1000,
+             Hd[h].avg_seek_us % 1000 / 10);
+    gfx_text(9, 2, C_LMAGENTA, text);
+    snprintf(text, sizeof(text), "Track-to-track seek   : %d.%02d ms", Hd[h].t2t_us / 1000, Hd[h].t2t_us % 1000 / 10);
+    gfx_text(10, 2, C_LGREEN, text);
+    snprintf(text, sizeof(text), "Buffered read speed   : %d KB/s", Hd[h].buffered_kbs);
+    gfx_text(11, 2, C_LCYAN, text);
+    snprintf(text, sizeof(text), "Linear read speed     : %d KB/s", Hd[h].avg_kbs);
+    gfx_text(12, 2, C_YELLOW, text);
+    for (int t = 0; t < HD_POINTS; t++)
+        if (Hd[h].kbs[t] > max)
+            max = Hd[h].kbs[t];
+    max = (max + 499) / 500 * 500;
+    gfx_rect(HCH_X0, HCH_Y0, HCH_X1, HCH_Y1, C_BLACK);
+    for (int g = 0; g <= 4; g++) {
+        int y = HCH_Y1 - g * (HCH_Y1 - HCH_Y0) / 4;
+        gfx_span(HCH_X0, HCH_X1, y, C_DGRAY);
+        snprintf(text, sizeof(text), "%d", max * g / 4);
+        gfx_text(y / 16, HCH_X0 / 8 - 1 - strlen(text), C_YELLOW, text);
+    }
+    int x0 = -1, y0 = 0;
+    for (int t = 0; t < HD_POINTS; t++) {
+        int x = HCH_X0 + t * (HCH_X1 - HCH_X0) / (HD_POINTS - 1);
+        int y = HCH_Y1 - Hd[h].kbs[t] * (HCH_Y1 - HCH_Y0) / max;
+        int ya = HCH_Y1 - (Hd[h].access_ms10[t] > 400 ? 400 : Hd[h].access_ms10[t]) * (HCH_Y1 - HCH_Y0) / 400;
+        gfx_rect(x, ya, x + 1, ya + 1, C_LGREEN);      // access time, 0-40 ms
+        if (x0 >= 0)
+            gfx_line(x0, y0, x, y, C_YELLOW);
+        x0 = x;
+        y0 = y;
+    }
+    gfx_text(HCH_Y1 / 16 + 1, HCH_X0 / 8, C_YELLOW, "read KB/s");
+    gfx_text(HCH_Y1 / 16 + 1, HCH_X0 / 8 + 13, C_LGREEN, "access 0-40 ms");
+    gfx_text(HCH_Y1 / 16 + 2, HCH_X0 / 8, C_WHITE, "start of the disk          end");
+}
+
+static int
+bench_disk(void)
+{
+    char text[80];
+    int sel = 0;
+    hd_list();
+    gfx_title("HARD DISK BENCHMARK");
+    if (!HdCount) {
+        gfx_text(3, 2, C_WHITE, "No hard disk");
+        return 0;
+    }
+    for (;;) {
+        for (int h = 0; h < HdCount; h++) {
+            snprintf(text, sizeof(text), "%c %s, %d MB", h == sel ? '>' : ' ', Hd[h].name, Hd[h].sectors / 2048);
+            gfx_rect(8, (2 + h) * 16, 631, (3 + h) * 16 - 1, C_BLUE);
+            gfx_text(2 + h, 2, h == sel ? C_YELLOW : C_WHITE, text);
+        }
+        gfx_text(29, 20, C_LCYAN, "\x18\x19 : Select disk   Enter : Test it");
+        int key = get_keystroke(1000);
+        if (key == 0x01)
+            return 1;                           // ESC taken
+        if (key == 0x48 && sel > 0)
+            sel--;
+        if (key == 0x50 && sel < HdCount - 1)
+            sel++;
+        if (key == 0x1c) {
+            gfx_rect(8, 112, 631, 463, C_BLUE);
+            gfx_text(10, 2, C_WHITE, "Testing (seek, then reading across the disk), ESC stops...");
+            hd_test(sel, hd_progress);
+            hd_show(sel);
+        }
+    }
+}
+
+// The PIO mode limits of the ATA interface (MB/s x 10): the reference scale of the disk bars.
+static const char * const RefPio[] = { "PIO 0", "PIO 1", "PIO 2", "PIO 3", "PIO 4" };
+static const u32 RefPioKbs[] = { 3300, 5200, 8300, 11100, 16600 };
+
+static int
+bench_disk_bars(void)
+{
+    int shown = 0;
+    gfx_title("HARD DISK SPEED");
+    if (!HdCount)
+        hd_list();
+    gfx_text(2, 2, C_WHITE, "Testing the disks not tested yet...");
+    for (int h = 0; h < HdCount && h < 3; h++)
+        if (!Hd[h].tested && !Hd[h].error)
+            hd_test(h, NULL);
+    gfx_rect(8, 32, 631, 47, C_BLUE);
+    for (int h = 0; h < HdCount && shown < 3; h++) {
+        if (Hd[h].error)
+            continue;
+        gfx_bar(32 + shown++ * 112, Hd[h].name, Hd[h].avg_kbs, "KB/s linear read", RefPio, RefPioKbs, 5, 0);
+    }
+    if (!shown)
+        gfx_text(3, 2, C_WHITE, "No hard disk could be read");
+    gfx_text(27, 2, C_GRAY, "References: the transfer limit of each ATA PIO mode.");
+    return 0;
+}
+
+// The benchmark pages: graphics until ESC, then back to the text mode of the setup.
+static void
+bench_run(int (*page)(void))
+{
+    if (!gfx_open()) {
+        scr_open();
+        info_line(3, "These pages need a VGA (mode 12h)");
+        while (get_keystroke(1000) != 0x01)
+            ;
+        return;
+    }
+    if (!page())                                // a page with its own keys took ESC already
+        while (get_keystroke(1000) != 0x01)
+            ;
+    scr_open();
+}
+
+static void info_bench_memory(void) { bench_run(bench_memory); }
+static void info_bench_cpu(void) { bench_run(bench_cpu); }
+static void info_bench_disk(void) { bench_run(bench_disk); }
+static void info_bench_disk_bars(void) { bench_run(bench_disk_bars); }
+
 
 static void
 summary_line(const char *left, const char *right)

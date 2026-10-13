@@ -325,15 +325,21 @@ entry_pmm:
         .global entry_pnp_prot
 entry_pnp_prot:
         pushl %esp
+        pushfl
+        cli
+        cld
+        PUSHBREGS
+        movl $1, %edx           // handle_pnp(args, prot)
         jmp 1f
 entry_pnp_real:
         pushl %esp              // Backup %esp, then clear high bits
         movzwl %sp, %esp
-1:
         pushfl                  // Save registers clobbered by C code
         cli
         cld
         PUSHBREGS
+        xorl %edx, %edx
+1:
         movw %ss, %cx           // Move %ss to %ds
         movw %cx, %ds
         leal PUSHBREGS_size+12(%esp), %eax  // %eax points to start of u16 args

@@ -28,7 +28,19 @@ struct usbdevice_s {
     int imax;
     u8 speed;
     u8 devaddr;
+    s8 listed;      // its UsbListed entry, -1 none
 };
+
+// Controllers and devices found, for the setup's USB page (a tree through 'parent').
+#define USB_LISTED_MAX 24
+struct usb_listed {
+    void *key;      // the controller (usb_s) or, while it is set up, the device (usbdevice_s)
+    s8 parent;      // index of the controller or hub; -1: a controller
+    u8 type, port, speed, cls, proto, ok;   // type: USB_TYPE_*; cls/proto: interface class and protocol
+    u16 vid, pid, bdf;
+};
+extern struct usb_listed UsbListed[USB_LISTED_MAX];
+extern int UsbListedCount;
 
 // Common information for usb controllers.
 struct usb_s {
