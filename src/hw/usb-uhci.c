@@ -261,9 +261,10 @@ uhci_controller_setup(struct pci_device *pci)
 
     dprintf(1, "UHCI init on dev %pP (io=%x)\n", pci, cntl->iobase);
 
-    pci_enable_busmaster(pci);
-
+    // Reset first: after a warm boot the controller may still run the schedule an OS left in RAM.
     reset_uhci(cntl, pci->bdf);
+
+    pci_enable_busmaster(pci);
 
     run_thread(configure_uhci, cntl);
 }

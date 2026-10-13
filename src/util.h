@@ -57,16 +57,21 @@ enum { POST_SEABIOS = 0xb0, POST_PLATFORM, POST_VGA, POST_BANNER, POST_DEVICES, 
        POST_OPTIONROMS, POST_SUMMARY, POST_PROMPT, POST_SETUP, POST_SETUP_MEMTEST, POST_PREPBOOT,
        POST_BOOT, POST_NO_BOOT };
 void post_code(u8 code);
-extern int SetupRequested;
+extern int SetupRequested, SetupBootMenu;
 extern u8 SetupL1Off;
 u16 setup_init(void);
 void setup_post_warnings(void);
 void setup_isapnp(void);
+void setup_pnp(void);
 void setup_menu(void);
 u32 setup_boot_delay(void);
 void setup_boot_password(void);
 void setup_post_banner(void);
 void setup_memtest(void);
+void setup_l2_cache(void);
+void setup_l2_post_line(void);
+struct drive_s;
+int boot_hd_list(struct drive_s **drive, const char **desc, int max);
 void setup_post_summary(void);
 void setup_finish(void);
 int setup_isa_shadow(u32 addr);
@@ -285,6 +290,8 @@ void pmm_prepboot(void);
 // pnpbios.c
 u16 get_pnp_offset(void);
 void pnp_init(void);
+void pnp_isa_ldev(int csn, const u8 *id, const u16 *io, const u8 *iolen, const u8 *irq, const u8 *dma);
+void pnp_finish(int csns, u16 readport, u8 board);
 
 // post.c
 void interface_init(void);

@@ -104,7 +104,7 @@ usb_process_op(struct disk_op_s *op)
     struct csw_s csw;
     ret = usb_msc_send(udrive_gf, USB_DIR_IN
                        , MAKE_FLATPTR(GET_SEG(SS), &csw), sizeof(csw));
-    if (ret)
+    if (ret || csw.dCSWSignature != CSW_SIGNATURE || csw.dCSWTag != cbw.dCBWTag)
         goto fail;
 
     if (!csw.bCSWStatus)
@@ -113,7 +113,7 @@ usb_process_op(struct disk_op_s *op)
         goto fail;
 
     if (blocksize)
-        op->count -= csw.dCSWDataResidue / blocksize;
+        op->count -= (csw.dCSWDataResidue < bytes ? csw.dCSWDataResidue : bytes) / blocksize;
     return DISK_RET_EBADTRACK;
 
 fail:
@@ -133,7 +133,7 @@ usb_msc_maxlun(struct usb_pipe *pipe)
     req.wLength = 1;
     unsigned char maxlun;
     int ret = usb_send_default_control(pipe, &req, &maxlun);
-    if (ret)
+    if (ret || maxlun > 15)
         return 0;
     return maxlun;
 }

@@ -98,8 +98,8 @@ ata_reset(struct atadrive_s *adrive_gf)
     outb(ATA_CB_DC_HD15 | ATA_CB_DC_NIEN, iobase2+ATA_CB_DC);
     msleep(2);
 
-    // wait for device to become not busy.
-    int status = await_not_bsy(iobase1);
+    // wait for device to become not busy (FFh: no device 0, the bus floats - wait on device 1).
+    int status = slave && inb(iobase1 + ATA_CB_STAT) == 0xff ? 0 : await_not_bsy(iobase1);
     if (status < 0)
         goto done;
     if (slave) {
@@ -379,9 +379,9 @@ struct sff_dma_prd {
 static int
 ata_try_dma(struct disk_op_s *op, int iswrite, int blocksize)
 {
-    ASSERT16();
-    if (! CONFIG_ATA_DMA)
+    if (! CONFIG_ATA_DMA)                       // first: without DMA the PIO path also runs in 32-bit mode
         return -1;
+    ASSERT16();
     u32 dest = (u32)op->buf_fl;
     if (dest & 1)
         // Need minimum alignment of 1.
@@ -716,7 +716,17 @@ send_ata_identity(struct atadrive_s *adrive, u16 *buffer, int command)
     memset(&cmd, 0, sizeof(cmd));
     cmd.command = command;
 
-    return ata_pio_cmd_data(&dop, 0, &cmd, 1);
+    int ret = ata_pio_cmd_data(&dop, 0, &cmd, 1);
+    if (ret)
+        return ret;
+    u32 sig = 0;
+    int i;
+    for (i = 0; i < 256; i++)
+        sig = sig * 31 + buffer[i];
+    if (adrive->slave)
+        return sig == adrive->chan_gf->master_sig ? -1 : 0;
+    adrive->chan_gf->master_sig = sig;
+    return 0;
 }
 
 // Extract the ATA/ATAPI version info.
@@ -869,6 +879,19 @@ init_drive_ata(struct atadrive_s *dummy, u16 *buffer)
     if (idx >= 0 && setup_ide_type(idx) == NB_HDD_NONE)
         return NULL;
 
+    // LBA48 only with LBA. Without LBA the drive is addressed by its IDENTIFY geometry: the head
+    // must fit the 4 bits of the device register, the sector the 8 bits of its register.
+    int chs_only = !(buffer[49] & (1 << 9));
+    u64 sectors;
+    if (chs_only)
+        sectors = buffer[3] > 16 || buffer[6] > 255 ? 0 : (u32)buffer[1] * buffer[3] * buffer[6];
+    else if (buffer[83] & (1 << 10)) // word 83 - lba48 support
+        sectors = *(u64*)&buffer[100]; // word 100-103
+    else
+        sectors = *(u32*)&buffer[60]; // word 60 and word 61
+    if (!sectors)
+        return NULL;
+
     // Success - setup as ATA.
     struct atadrive_s *adrive = init_atadrive(dummy, buffer);
     if (!adrive)
@@ -880,14 +903,7 @@ init_drive_ata(struct atadrive_s *dummy, u16 *buffer)
     adrive->drive.pchs.head = buffer[3];
     adrive->drive.pchs.sector = buffer[6];
 
-    u64 sectors;
-    if (buffer[83] & (1 << 10)) // word 83 - lba48 support
-        sectors = *(u64*)&buffer[100]; // word 100-103
-    else if (buffer[49] & (1 << 9)) // word 49 - lba support
-        sectors = *(u32*)&buffer[60]; // word 60 and word 61
-    else
-        sectors = (u32)buffer[1] * buffer[3] * buffer[6];
-    adrive->chs_only = !(buffer[49] & (1 << 9));
+    adrive->chs_only = chs_only;
     adrive->drive.sectors = sectors;
     u64 adjsize = sectors >> 11;
     char adjprefix = 'M';
@@ -1048,6 +1064,7 @@ init_controller(struct pci_device *pci, int chanid, int irq
     chan_gf->iobase1 = port1;
     chan_gf->iobase2 = port2;
     chan_gf->iomaster = master;
+    chan_gf->master_sig = 0;
     dprintf(1, "ATA controller %d at %x/%x/%x (irq %d dev %x)\n"
             , ataid, port1, port2, master, irq, chan_gf->pci_bdf);
     run_thread(ata_detect, chan_gf);

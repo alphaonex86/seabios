@@ -134,19 +134,18 @@ tryReboot(void)
     // Reboot using ACPI RESET_REG
     // acpi_reboot();
 
-    // Try keyboard controller reboot.
-    // i8042_reboot();
-
-    // Try PCI 0xcf9 reboot
-    // pci_reboot();	//not on 486
+    // Keyboard controller reset pulse, as the original BIOS (on the MB-8433UUD-A port 92h does not reset:
+    // Ctrl+Alt+Del hung with it alone).
+    i8042_reboot();
 
     // PORT 92h reset: bit 0 resets on a 0 -> 1 transition
     u8 port92 = inb(0x92) & ~1;
     outb(port92, 0x92);
     outb(port92 | 1, 0x92);
+    udelay(100);
 
-    // Try triple fault
-    // asm volatile("int3");
+    // Triple fault: an interrupt in 32-bit mode with the dummy IDT shuts the CPU down, which resets it
+    asm volatile("int3");
 
     panic("Could not reboot");
 }

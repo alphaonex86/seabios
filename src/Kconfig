@@ -86,6 +86,13 @@ endchoice
         help
             Support overriding bios (logical) geometry of boot devices via the
             fw_cfg/CBFS "bios-geometry" file.
+    config NEWBIOS_HALT_ON
+        depends on SETUP_MENU
+        int "Default Halt On (0 All Errors, 1 No Errors, 2 All But Keyboard, 3 All But Diskette, 4 All But Disk/Key)"
+        default 0
+        help
+            Setup default of Halt On, also used when the CMOS is lost (dead battery).
+            1 boots a machine without keyboard through POST errors.
 
     config COREBOOT_FLASH
         depends on COREBOOT

@@ -317,9 +317,19 @@ ehci_controller_setup(struct pci_device *pci)
 
     dprintf(1, "EHCI init on dev %pP (regs=%p)\n", pci, cntl->regs);
 
-    pci_enable_busmaster(pci);
+    // Halt it before bus mastering (at most 16 microframes): after a warm boot the controller may still run
+    // the schedule an OS left in RAM.
+    writel(&cntl->regs->usbcmd, readl(&cntl->regs->usbcmd) & ~(CMD_RUN | CMD_ASE | CMD_PSE));
+    u32 end = timer_calc(5), sts;
+    while (!((sts = readl(&cntl->regs->usbsts)) & STS_HALT) || sts == ~0)   // all ones: not answering
+        if (timer_check(end)) {
+            dprintf(1, "EHCI %pP does not halt: left off\n", pci);
+            PendingEHCI--;
+            free(cntl);
+            return;
+        }
 
-    // XXX - check for and disable SMM control?
+    pci_enable_busmaster(pci);
 
     run_thread(configure_ehci, cntl);
 }
