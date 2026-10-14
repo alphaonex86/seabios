@@ -468,65 +468,6 @@ isa_roms_setup(void)
     IsaRomEnd = end;
 }
 
-/****************************************************************
- * Boot ROM in the flash
- ****************************************************************/
-
-// A 2 Mbit flash holds iPXE in its lower 128 KiB, decoded at FFFC0000 while UM8886 57h bits 7-6 are set (with a
-// 1 Mbit chip that is the BIOS's own first half again: no valid ROM there). Copied while the decode is on, it
-// becomes the boot ROM of the board's Realtek NICs, in place of their socket ROMs.
-#ifndef FLASH_LOW_BASE
-#define FLASH_LOW_BASE 0xfffc0000
-#endif
-static u8 *FlashRom;
-static u32 FlashRomSize;
-
-static int
-flash_rom_copy(struct romfile_s *file, void *dest, u32 maxlen)
-{
-    if (FlashRomSize > maxlen)
-        return -1;
-    memcpy(dest, FlashRom, FlashRomSize);
-    return FlashRomSize;
-}
-
-static void
-flash_rom_setup(void)
-{
-    static const u16 nics[] = { 0x8039, 0x8139, 0x8169 };
-    u16 ibc = pci_to_bdf(0, 0x12, 0);
-    u8 r57 = pci_config_readb(ibc, 0x57);
-    pci_config_writeb(ibc, 0x57, r57 | 0xc0);
-    void *rom = (void *)FLASH_LOW_BASE;
-    u32 size = readw(rom) == OPTION_ROM_SIGNATURE ? readb(rom + 2) * 512 : 0;
-    u8 *copy = size ? malloc_tmphigh(size) : NULL;
-    for (u32 i = 0; copy && i < size; i++)
-        copy[i] = readb(rom + i);
-    pci_config_writeb(ibc, 0x57, r57);
-    u8 sum = 0;
-    for (u32 i = 0; copy && i < size; i++)
-        sum += copy[i];
-    if (!copy || sum) {
-        free(copy);
-        return;
-    }
-    FlashRom = copy;
-    FlashRomSize = size;
-    dprintf(1, "Boot ROM in the flash: %d bytes\n", size);
-    for (int i = 0; i < ARRAY_SIZE(nics); i++) {
-        struct romfile_s *file = malloc_tmp(sizeof(*file));
-        if (!file) {
-            warn_noalloc();
-            return;
-        }
-        memset(file, 0, sizeof(*file));
-        snprintf(file->name, sizeof(file->name), "pci10ec,%04x.rom", nics[i]);
-        file->size = size;
-        file->copy = flash_rom_copy;
-        romfile_add(file);
-    }
-}
-
 void
 optionrom_setup(void)
 {
@@ -535,7 +476,6 @@ optionrom_setup(void)
 
     u32 post_vga = rom_get_last();
     isa_roms_setup();
-    flash_rom_setup();
 
     dprintf(1, "Scan for option roms\n");
     u64 sources[(BUILD_BIOS_ADDR - BUILD_ROM_START) / OPTION_ROM_ALIGN];

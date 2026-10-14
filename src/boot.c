@@ -461,7 +461,8 @@ build_usb_path(char *buf, int max, struct usbhub_s *hub)
     return p;
 }
 
-int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
+static int
+bootprio_find_usb_path(struct usbdevice_s *usbdev, int lun)
 {
     if (!CONFIG_BOOTORDER)
         return -1;
@@ -495,6 +496,14 @@ dprintf(3, "C10b\n");
 
 dprintf(3, "C10c\n");
     return ret2;
+}
+
+static int DefaultUSBPrio = -1;   // setup's USB boot position; -1: USB drives go with the hard disks
+
+int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
+{
+    int prio = bootprio_find_usb_path(usbdev, lun);
+    return prio >= 0 ? prio : DefaultUSBPrio;
 }
 
 
@@ -540,6 +549,7 @@ boot_init(void)
             case 2: DefaultHDPrio = i;     break;
             case 3: DefaultCDPrio = i;     break;
             case 4: DefaultBEVPrio = i;    break;
+            case 5: DefaultUSBPrio = i;    break;
             }
         }
     }

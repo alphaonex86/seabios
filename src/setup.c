@@ -24,13 +24,13 @@
 #include "x86.h" // cpuid
 
 u8 Setting[NB_COUNT];
-static int SetupDefaulted, ChipsetFallback;   // POST warnings, see setup_post_warnings()
+static int SetupDefaulted, ChipsetFallback, PrevPostCode;   // POST warnings, see setup_post_warnings()
 u8 SetupL1Off VARFSEG;                          // "CPU Internal Cache" disabled, for handle_resume()
 static u16 Password;   // hash, 0 = none
 
 static const u8 Defaults[NB_COUNT] = {
     [NB_FLOPPY_A] = 4, [NB_HALT_ON] = CONFIG_NEWBIOS_HALT_ON, [NB_L1_CACHE] = 1, [NB_L2_CACHE] = 1,
-    [NB_BOOT1] = 1, [NB_BOOT2] = 2, [NB_BOOT3] = 3, [NB_BOOT4] = 4,
+    [NB_BOOT1] = 2, [NB_BOOT2] = 5, [NB_BOOT3] = 4, [NB_BOOT4] = 1,
     [NB_BOOT_DELAY] = 1, [NB_NUMLOCK] = 1, [NB_QUICK_POST] = 1, [NB_IDE_BLOCK] = 1, [NB_CHIPSET_AUTO] = 1, [NB_APM] = 1,
     [NB_IDE_32BIT] = 1, [NB_ISAPNP] = 1, [NB_IDE_PRIMARY] = 1, [NB_IDE_SECONDARY] = 1, [NB_FDC] = 1,
     [NB_COM1] = 1, [NB_COM2] = 2, [NB_LPT] = 1,
@@ -341,10 +341,15 @@ setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pi
 
 static void settings_check(u8 *val);
 
+static int PrevLastPost = -1;   // CMOS 3Fh as the previous POST left it: read before this one's first code
+
 void
 post_code(u8 code)
 {
     outb(code, 0x80);
+    if (PrevLastPost < 0)
+        PrevLastPost = rtc_read(NB_CMOS_LASTPOST);
+    rtc_write(NB_CMOS_LASTPOST, code);
 }
 
 static u32 MemtestBad;
@@ -394,6 +399,8 @@ setup_post_warnings(void)
         snprintf(msg, sizeof(msg), "Memory test fail at %x", MemtestBad);
         errors |= post_error(ERR_OTHER, msg);
     }
+    if (PrevPostCode)
+        printf("The previous POST did not finish, its last POST code: %02X\n", PrevPostCode);
     if (ChipsetFallback)
         printf("Chipset setup values not used after %d unfinished POSTs.\n", ChipsetFallback);
     if (!(errors & halts[Setting[NB_HALT_ON]])) {
@@ -427,6 +434,8 @@ setup_init(void)
         settings_check(Setting);
         hdd_load();
         int fails = rtc_read(NB_CMOS_BOOTFAIL) - 1;   // coreboot counted this POST already
+        if (fails > 0)
+            PrevPostCode = PrevLastPost;
         if (!Setting[NB_CHIPSET_AUTO] && fails >= NB_BOOTFAIL_MAX)
             ChipsetFallback = fails;                   // coreboot used the chipset defaults
     } else {
@@ -689,7 +698,7 @@ static const char * const HaltOn[] = {
     "All Errors", "No Errors", "All, But Keyboard", "All, But Diskette", "All, But Disk/Key"
 };
 static const char * const IdeMode[] = { "AUTO", "NORMAL", "LBA", "LARGE" };
-static const char * const BootDev[] = { "", "Floppy", "Hard Disk", "CD-ROM", "Network" };
+static const char * const BootDev[] = { "", "Floppy", "Hard Disk", "CD-ROM", "Network", "USB" };
 static const char * const Delay[] = { "1 Sec", "2 Sec", "3 Sec", "5 Sec" };
 static const char * const Rate[] = { "6", "8", "10", "12", "15", "20", "24", "30" };
 static const char * const RepDelay[] = { "250", "500", "750", "1000" };
@@ -875,11 +884,13 @@ settings_check(u8 *val)
             if (it->var < NB_COUNT && !item_valid_value(it, val[it->var]))
                 val[it->var] = Defaults[it->var];
         }
-    // Each boot device class exactly once.
-    int seen = 0;
-    for (i = NB_BOOT1; i <= NB_BOOT4; i++)
+    // Four different boot device classes; the one not listed boots last.
+    int seen = 0, bad = 0;
+    for (i = NB_BOOT1; i <= NB_BOOT4; i++) {
+        bad |= !val[i] || (seen & 1 << val[i]);
         seen |= 1 << val[i];
-    if (seen != 0x1e)
+    }
+    if (bad)
         for (i = NB_BOOT1; i <= NB_BOOT4; i++)
             val[i] = Defaults[i];
 }
@@ -1224,10 +1235,37 @@ cpu_mhz(void)
     return ticks ? (954400000 / ticks + 500) / 1000 : 0;   // 800000 clocks * 1.193 MHz
 }
 
+// Core/bus clock ratio from the CPU (as coreboot's newbios.c, whose timings follow it): the multiplier pins are not
+// readable. Am5x86: 4x when only 4x gives a standard bus (133 = 4 x 33), else 3x; DX2 above 85 MHz are DX4s.
+static int
+standard_bus(u32 mhz, u32 m)
+{
+    static const u16 bus10[] = { 250, 333, 400, 500 };   // in 0.1 MHz
+    for (int i = 0; i < ARRAY_SIZE(bus10); i++)
+        if (mhz * 250 >= bus10[i] * m * 24 && mhz * 250 <= bus10[i] * m * 26)
+            return 1;
+    return 0;
+}
+
+static u32
+cpu_multiplier(u32 mhz, u32 fms, int have_cpuid)
+{
+    u8 sig = have_cpuid ? fms >> 4 : rtc_read(NB_CMOS_CPUSIG);
+    if (sig >> 4 != 4)
+        return 1;
+    switch (sig & 0x0f) {
+    case 3: case 5: case 7: return mhz > 85 ? 3 : 2;
+    case 8: case 9: return 3;
+    case 14: case 15: return standard_bus(mhz, 4) && !standard_bus(mhz, 3) ? 4 : 3;
+    }
+    return 1;
+}
+
 // What setup_l2_cache found, for the CPU page (the reason when the L2 stays off).
-enum { L2_NOT_RUN, L2_NONE, L2_SETUP_OFF, L2_RAM_SMALL, L2_HUNG, L2_TAG0, L2_TAGMIX, L2_TAGMAX, L2_NOCACHE, L2_OK };
+enum { L2_NOT_RUN, L2_NONE, L2_SETUP_OFF, L2_RAM_SMALL, L2_HUNG, L2_CRASHED, L2_TAG0, L2_TAGMIX, L2_TAGMAX, L2_NOCACHE, L2_OK };
 static const char * const L2Names[] = {
     "not checked", "none found", "off in setup", "RAM too small to init", "hang in the previous L2 init",
+    "the previous POST stopped with it on",
     "check failed: tag 0", "check failed: mixed tag", "check failed: tag all ones", "check failed: no caching",
     "checked"
 };
@@ -1246,10 +1284,11 @@ static void
 info_cpu(void)
 {
     char line[80], vendor[13];
-    u32 fms, edx;
+    u32 fms = 0, edx;
     int mhz_valid = 0, row = 4;
     const char *name = "486 (no CPUID)";
-    if (cpu_ident(vendor, &fms, &edx)) {
+    int have_cpuid = cpu_ident(vendor, &fms, &edx);
+    if (have_cpuid) {
         name = cpu_name(vendor, fms, &mhz_valid);
         snprintf(line, sizeof(line), "CPU            : %s (%s)", name, vendor);
         info_line(row++, line);
@@ -1270,19 +1309,41 @@ info_cpu(void)
         info_line(row++, line);
         row += 2;
     }
-    if (mhz_valid) {
-        snprintf(line, sizeof(line), "Core clock     : %d MHz (measured)", cpu_mhz());
-        info_line(row, line);
-    }
-    row += 2;
-    snprintf(line, sizeof(line), "L1 cache       : %s",
-             (cr0_read() & CR0_CD) ? "disabled" : "enabled");
+    // clocks: the core measured, the bus from it and the CPU's multiplier, the rest from the chipset dividers
+    static const u16 std_bus10[] = { 250, 333, 400, 500 };
+    u32 mhz = cpu_mhz(), mult = cpu_multiplier(mhz, fms, have_cpuid), bus10 = mhz * 10 / mult;
+    for (int i = 0; i < ARRAY_SIZE(std_bus10); i++)  // within 4% of a standard bus clock: that one
+        if (bus10 * 25 >= std_bus10[i] * 24 && bus10 * 25 <= std_bus10[i] * 26)
+            bus10 = std_bus10[i];
+    u32 bus = (bus10 + 5) / 10;
+    u8 hb50 = pci_config_readb(HB_BDF, 0x50), hb51 = pci_config_readb(HB_BDF, 0x51);
+    u8 a4 = pci_config_readb(IBC_BDF, 0xa4) & 3, i56 = pci_config_readb(IBC_BDF, 0x56) & 3;
+    u32 pci10 = a4 == 1 ? bus10 : a4 == 2 ? bus10 * 2 / 3 : bus10 / 2;   // host:PCI 1:1, 2/3, 1/2
+    snprintf(line, sizeof(line), "Core clock     : %d MHz (measured)", mhz);
     info_line(row++, line);
-    u8 l2 = pci_config_readb(HB_BDF, 0x50), found = rtc_read(NB_CMOS_L2);
+    snprintf(line, sizeof(line), "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)",
+             bus10 / 10, bus10 % 10, mult);
+    info_line(row++, line);
+    if (i56 < 2)
+        snprintf(line, sizeof(line), "PCI / ISA clock: %d.%d MHz (host:PCI %s) / %d.%d MHz (PCICLK/%d)", pci10 / 10,
+                 pci10 % 10, a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2", pci10 / (i56 ? 4 : 3) / 10,
+                 pci10 / (i56 ? 4 : 3) % 10, i56 ? 4 : 3);
+    else
+        snprintf(line, sizeof(line), "PCI clock      : %d.%d MHz (host:PCI %s)", pci10 / 10, pci10 % 10,
+                 a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2");
+    info_line(row++, line);
+    row++;
+    u32 fam = (fms >> 8) & 0xf, model = (fms >> 4) & 0xf;
+    int l1kb = fam == 4 && (model == 8 || model == 9 || model >= 14) ? 16 : 8;   // DX4, Am5x86: 16 KB
+    snprintf(line, sizeof(line), "L1 cache       : %d KB, %s, at %d MHz (core clock)", l1kb,
+             (cr0_read() & CR0_CD) ? "disabled" : "enabled", mhz);
+    info_line(row++, line);
+    static const char * const l2_timing[] = { "3-2-2-2", "3-1-1-1", "2-2-2-2", "2-1-1-1" };
+    u8 l2 = hb50, found = rtc_read(NB_CMOS_L2);
     if (L2Status == L2_OK || L2Status == L2_NOT_RUN)
-        snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s)",
+        snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s), %d MHz, %s",
                  (l2 & 7) ? 32 << (l2 & 7) : 0, (l2 & 0x40) ? "write-back" : "write-through",
-                 (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1);
+                 (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1, bus, l2_timing[(l2 >> 4) & 3]);
     else if (L2Status == L2_NONE)
         snprintf(line, sizeof(line), "L2 cache       : none");
     else if (L2Status == L2_HUNG && L2HungStep)
@@ -1296,6 +1357,9 @@ info_cpu(void)
     u32 extkb = ext_mem_kb();
     snprintf(line, sizeof(line), "DRAM           : %d KB (base %d KB, extended %d KB)",
              extkb + 1024, GET_BDA(mem_size_kb), extkb);
+    info_line(row++, line);
+    snprintf(line, sizeof(line), "DRAM timing    : at %d MHz (bus), %s, read %d WS, write %d WS", bus,
+             (pci_config_readb(HB_BDF, 0x61) & 0xc0) ? "EDO" : "fast page mode", 3 - (hb51 >> 6), 3 - (hb51 >> 4 & 3));
     info_line(row++, line);
     snprintf(line, sizeof(line), "Chipset        : UMC UM8881F rev %x, UM8886BF rev %x, UM8663BF",
              pci_config_readb(HB_BDF, PCI_REVISION_ID), pci_config_readb(IBC_BDF, PCI_REVISION_ID));
@@ -1972,7 +2036,7 @@ setup_boot_password(void)
  * Main menu
  ****************************************************************/
 
-enum { M_PAGE, M_INFO, M_PASSWORD, M_IDE, M_MEMTEST, M_CACHETEST, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
+enum { M_PAGE, M_INFO, M_PASSWORD, M_IDE, M_MEMTEST, M_CACHETEST, M_SRAMTEST, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
 
 static const struct {
     u8 kind, arg;
@@ -1989,6 +2053,7 @@ static const struct {
     { M_IDE, 0, "IDE HDD AUTO DETECTION", "Drives found at this boot" },
     { M_MEMTEST, 0, "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM" },
     { M_CACHETEST, 0, "CACHE TEST", "L2 cache: each write policy, timing and tag width" },
+    { M_SRAMTEST, 0, "L2 SRAM TEST", "L2 cache chips: which one fails" },
     { M_BIOS_DEFAULTS, 0, "LOAD BIOS DEFAULTS", "Load BIOS Defaults except Standard CMOS SETUP" },
     { M_DEFAULTS, 0, "LOAD SETUP DEFAULTS", "Load SETUP Defaults except Standard CMOS SETUP" },
     { M_SAVE, 0, "SAVE & EXIT SETUP", "Save Data to CMOS & Exit SETUP" },
@@ -1998,6 +2063,7 @@ static const struct {
 #define MENU_ROWS 8
 
 static void l2_test_run(void);
+static void l2_sram_test(void);
 
 static void
 save_and_reboot(void)
@@ -2059,6 +2125,7 @@ setup_menu(void)
             case M_IDE: info_page(4); break;
             case M_MEMTEST: mt_run(); break;
             case M_CACHETEST: l2_test_run(); break;
+            case M_SRAMTEST: l2_sram_test(); break;
             case M_PASSWORD: password_set(); break;
             case M_BIOS_DEFAULTS:
                 if (scr_confirm("Load BIOS Defaults (Y/N)? "))
@@ -2445,10 +2512,18 @@ l2_log(const char *text)
     msleep(1000);
 }
 
+// Each step: a POST code (C0h + step) and CMOS 3Eh; during the POST init also on the POST screen's L2 line.
 static void
 l2_step(int step, const char *text)
 {
+    post_code(0xc0 + step);
     rtc_write(NB_CMOS_L2, (rtc_read(NB_CMOS_L2) & 0x8f) | step << 4);
+    if (L2Status == L2_NOT_RUN && Vram) {
+        char line[80];
+        snprintf(line, sizeof(line), "External Cache : init step %d, %s", step, L2StepNames[step]);
+        scr_fill(ROW_CACHE, 0, 80, AttrText, ' ');
+        scr_puts(ROW_CACHE, 0, AttrText, line);
+    }
     if (L2Log) {
         char line[80];
         snprintf(line, sizeof(line), "Step %d %s: %s", step, L2StepNames[step], text);
@@ -2468,22 +2543,15 @@ l2_log_regs(const char *when)
     l2_log(line);
 }
 
-// One fill pass (l2_fill), in L2-size blocks with the progress logged.
+// One fill pass (l2_fill) in a single call, logged before: no code may run between blocks, a stack or code
+// line read with the L2 half filled can hit a power-on line (wrong data, seen on the real board).
 static void
-l2_fill_logged(u32 base, u32 end, u32 size, u8 hb50)
+l2_fill_logged(u32 base, u32 end, u8 hb50)
 {
     char line[80];
-    if (!L2Log) {
-        l2_fill(base, (end - base) / 4, hb50);
-        return;
-    }
-    for (u32 a = base; a < end; a += size) {
-        u32 n = end - a < size ? end - a : size;
-        snprintf(line, sizeof(line), "  50h=%02x reading %08x-%08x (%d/%d)", hb50, a, a + n - 1,
-                 (a - base) / size + 1, (end - base + size - 1) / size);
-        l2_log(line);
-        l2_fill(a, n / 4, hb50);
-    }
+    snprintf(line, sizeof(line), "  50h=%02x reading %08x-%08x", hb50, base, end - 1);
+    l2_log(line);
+    l2_fill(base, (end - base) / 4, hb50);
 }
 
 #define L2_SAMPLES 16
@@ -2566,7 +2634,7 @@ l2_enable(u8 hb50, int tag8)
     // back into that same range instead of over live memory.
     u8 wt = (hb50 & ~0x40) | 0x80;
     l2_step(L2S_FILL_WT, "every line given a tag");
-    l2_fill_logged(base, end, size, wt);
+    l2_fill_logged(base, end, wt);
     l2_samples(base, end, samples, 1);
     // checked while still write-through: a broken tag RAM would write garbage back once write-back is on
     l2_step(L2S_CHECKS, "tag 0, mixed, max; caching");
@@ -2576,7 +2644,7 @@ l2_enable(u8 hb50, int tag8)
         : !l2_check(1, 0x100, size, wt) ? L2_NOCACHE : L2_OK;
     if (status == L2_OK) {
         l2_step(L2S_FILL_WB, hb50 & 0x40 ? "write-back on" : "write-through kept");
-        l2_fill_logged(base, end, size, hb50 | 0x80);
+        l2_fill_logged(base, end, hb50 | 0x80);
     } else
         pci_config_writeb(HB_BDF, 0x50, hb50 & 0x30);   // fully off (no size): the state the board booted in
     l2_step(L2S_RESTORE, status == L2_OK ? "L2 on" : L2Names[status]);
@@ -2616,7 +2684,9 @@ setup_l2_cache(void)
     u8 hb50 = (pci_config_readb(HB_BDF, 0x50) & 0xf0) | (found & 0x0f);
     u32 size = l2_size(hb50), end, base = l2_scratch(size, &end);
     L2Status = !size ? L2_NONE : !Setting[NB_L2_CACHE] ? L2_SETUP_OFF : end < base + 2*size ? L2_RAM_SMALL
-        : (!SetupDefaulted && (found & 0x80)) ? L2_HUNG : L2_NOT_RUN;
+        : (!SetupDefaulted && (found & 0x80)) ? L2_HUNG
+        : (PrevPostCode == 0xc5 || PrevPostCode == POST_OPTIONROMS || PrevPostCode == POST_SUMMARY) ? L2_CRASHED
+        : L2_NOT_RUN;   // L2_CRASHED: a bad L2 crashes anywhere once on (B8 waits for keys: a reset there is fine)
     if (found & 0x80)
         L2HungStep = (found >> 4) & 7;
     rtc_write(NB_CMOS_L2, found & 0x0f);
@@ -2747,6 +2817,386 @@ l2_test_run(void)
     }
 }
 
+/****************************************************************
+ * L2 SRAM TEST: the L2 chips tested in place, at full speed, on any L2 this chipset takes.
+ * Data chips: with UM8881 5Ah bit 6 (forced hit) every cacheable access goes to the L2 data SRAM whatever the tags
+ * say; the size and the banks are found by aliasing, byte lane by byte lane, then every cell holds a 0 and a 1.
+ * Tag RAM: lines filled in normal mode with a tag that varies line by line, their data then overwritten in forced
+ * hit mode: read again, each must hit (a wrong stored tag misses and reads DRAM). Dirty bit (7+1 tags): a line
+ * written in write-back and evicted must reach DRAM.
+ * The routines and their variables are in the F segment, in DRAM but not cacheable meanwhile (55h bit 5 off): out
+ * of the L2's reach. They touch no stack while the L2 is on or forced.
+ ****************************************************************/
+
+struct l2s_vars { u32 a2_0, a2_1, key, mask_shift, lines, hb50, good, fails, tag_and, tag_or, base, size, dwords,
+                  size_mask, tag_base, tested; };
+struct l2s_vars L2sVars VARFSEG;
+// ebx = &L2sVars in the routines; offsets: a2_0 0, a2_1 4, key 8, mask_shift 12, lines 16, hb50 20, good 24,
+// fails 28, tag_and 32, tag_or 36, base 40, size 44, dwords 48, size_mask 52, tag_base 56, tested 60
+
+#define L2S_FORCED(change) "movl $0x80008058, %%eax\n movw $0xcf8, %%dx\n outl %%eax, %%dx\n" \
+                           "movw $0xcfe, %%dx\n inb %%dx, %%al\n" change "outb %%al, %%dx\n"
+#define L2S_HB50(change)   "movl $0x80008050, %%eax\n movw $0xcf8, %%dx\n outl %%eax, %%dx\n" \
+                           "movw $0xcfc, %%dx\n movb 20(%%ebx), %%al\n" change "outb %%al, %%dx\n"
+#define L2S_HASH "movl %%esi, %%eax\n shrl $2, %%eax\n imull $0x9e3779b1, %%eax, %%eax\n" \
+                 "movl %%eax, %%edx\n shrl $16, %%edx\n xorl %%edx, %%eax\n xorl 8(%%ebx), %%eax\n"
+// line offset esi -> eax: its address with a tag mixed from the offset (key odd; key 0: tag_base's tag only),
+// 0 to skip (A0000-FFFFF)
+#define L2S_LINE "movl %%esi, %%eax\n imull 8(%%ebx), %%eax\n andl 12(%%ebx), %%eax\n addl %%esi, %%eax\n" \
+                 "addl 56(%%ebx), %%eax\n" \
+                 "cmpl $0xa0000, %%eax\n jb 9f\n cmpl $0x100000, %%eax\n jae 9f\n xorl %%eax, %%eax\n 9:\n"
+#define L2S_LOOP(body) "xorl %%esi, %%esi\n movl 16(%%ebx), %%ecx\n" \
+                       "8:\n" L2S_LINE "testl %%eax, %%eax\n jz 7f\n" body "7: addl $16, %%esi\n decl %%ecx\n jnz 8b\n"
+#define L2S_CLOBBERS "eax", "ecx", "edx", "esi", "edi", "memory"
+
+// In forced hit mode: [x] = v, [y] = w, then [x]
+u32 VISIBLE32FLAT
+l2s_probe(u32 x, u32 v, u32 y, u32 w)
+{
+    asm volatile(L2S_FORCED("orb $0x40, %%al\n")
+                 "movl %%ebx, (%%esi)\n movl %%ecx, (%%edi)\n movl (%%esi), %%ebx\n"
+                 L2S_FORCED("andb $0xbf, %%al\n")
+                 : "+b"(v) : "S"(x), "D"(y), "c"(w) : "eax", "edx", "memory");
+    return v;
+}
+
+// In forced hit mode: dwords from base written with a hash of their address xor key, read back: the bits that
+// differed in dwords with A2 = 0 (a2_0) and A2 = 1 (a2_1)
+void VISIBLE32FLAT
+l2s_pass(void)
+{
+    asm volatile(L2S_FORCED("orb $0x40, %%al\n")
+                 "movl 40(%%ebx), %%esi\n movl 48(%%ebx), %%ecx\n"
+                 "1:\n" L2S_HASH "movl %%eax, (%%esi)\n addl $4, %%esi\n decl %%ecx\n jnz 1b\n"
+                 "movl 40(%%ebx), %%esi\n movl 48(%%ebx), %%ecx\n movl $0, 0(%%ebx)\n movl $0, 4(%%ebx)\n"
+                 "2:\n" L2S_HASH "xorl (%%esi), %%eax\n movl %%esi, %%edi\n andl $4, %%edi\n orl %%eax, (%%ebx,%%edi)\n"
+                 "addl $4, %%esi\n decl %%ecx\n jnz 2b\n"
+                 L2S_FORCED("andb $0xbf, %%al\n")
+                 : : "b"(&L2sVars) : L2S_CLOBBERS);
+}
+
+// Tags: lines filled (L2 on), their data overwritten in forced hit mode (at the same line of the size-aligned
+// buffer at base: only that is written, should the chipset also write DRAM), read again (L2 on): those that miss;
+// L2 off at the end
+void VISIBLE32FLAT
+l2s_tags(void)
+{
+    asm volatile(L2S_HB50("")
+                 L2S_LOOP("movl (%%eax), %%edi\n")
+                 L2S_FORCED("orb $0x40, %%al\n")
+                 L2S_LOOP("movl %%eax, %%edi\n xorl $0x5aa5c33c, %%edi\n andl 52(%%ebx), %%eax\n addl 40(%%ebx), %%eax\n"
+                          "movl %%edi, (%%eax)\n")
+                 L2S_FORCED("andb $0xbf, %%al\n")
+                 L2S_LOOP("incl 60(%%ebx)\n movl (%%eax), %%edi\n xorl %%eax, %%edi\n xorl $0x5aa5c33c, %%edi\n"
+                          "andl 24(%%ebx), %%edi\n"
+                          "jz 7f\n incl 28(%%ebx)\n andl 12(%%ebx), %%eax\n andl %%eax, 32(%%ebx)\n orl %%eax, 36(%%ebx)\n")
+                 L2S_HB50("andb $0x7f, %%al\n")
+                 : : "b"(&L2sVars) : L2S_CLOBBERS);
+}
+
+// Dirty bit: lines filled in write-through (lines still dirty from power-on or the tag test now belong to this
+// range: write-back cannot throw them over live memory), written in write-back (X: dirty), their DRAM changed behind
+// the L2 (Y, L2 off), then evicted by the lines one L2 size above: a working dirty bit writes X back over Y.
+// Returns in fails the lines whose DRAM still holds Y.
+#define L2S_LINES(start, body) "movl 40(%%ebx), %%esi\n" start "movl 16(%%ebx), %%ecx\n" \
+                               "1: " body "addl $16, %%esi\n decl %%ecx\n jnz 1b\n"
+void VISIBLE32FLAT
+l2s_dirty(void)
+{
+    asm volatile(L2S_HB50("andb $0xbf, %%al\n")
+                 L2S_LINES("", "movl (%%esi), %%eax\n")
+                 L2S_HB50("")
+                 L2S_LINES("", "movl %%esi, (%%esi)\n")
+                 L2S_HB50("andb $0x7f, %%al\n")
+                 L2S_LINES("", "movl %%esi, %%eax\n notl %%eax\n movl %%eax, (%%esi)\n")
+                 L2S_HB50("")
+                 L2S_LINES("addl 44(%%ebx), %%esi\n", "movl (%%esi), %%eax\n")
+                 L2S_HB50("andb $0x7f, %%al\n")
+                 L2S_LINES("", "movl (%%esi), %%eax\n xorl %%esi, %%eax\n andl 24(%%ebx), %%eax\n jz 2f\n"
+                               "incl 28(%%ebx)\n 2: ")
+                 : : "b"(&L2sVars) : L2S_CLOBBERS);
+}
+
+// Per byte lane, whether it read back the value written: a bit mask of the 4 lanes.
+static int
+lanes_equal(u32 a, u32 b)
+{
+    int m = 0;
+    for (int l = 0; l < 4; l++)
+        m |= (((a ^ b) >> (8 * l)) & 0xff) ? 0 : 1 << l;
+    return m;
+}
+
+static int
+popcount4(int m)
+{
+    return (m & 1) + (m >> 1 & 1) + (m >> 2 & 1) + (m >> 3 & 1);
+}
+
+// Banks and size by aliasing in forced hit mode (50h: hb50's timing bits, bit 7 off); the majority of the lanes
+// that answer decides. Returns the 50h bank and size bits, 0 when no lane answers; *lanes: those that answered.
+static u8
+l2_sram_detect(u32 base, u8 hb50, int *lanes)
+{
+    u8 bits = (hb50 & 0x30) | 0x08 | 5;            // 2 banks, 1 MB: the most this chipset takes
+    pci_config_writeb(HB_BDF, 0x50, bits);
+    int bank0 = lanes_equal(l2s_probe(base, 0x3cc3a55a, base + 8, 0xc33c5aa5), 0x3cc3a55a);
+    // A2 = 1 written first, then A2 = 0: a missing bank floats to the last value on the bus
+    int bank1 = lanes_equal(l2s_probe(base + 4, 0x5aa5c33c, base, 0xa55a3cc3), 0x5aa5c33c);
+    *lanes = bank0;
+    if (!bank0)
+        return 0;
+    if (popcount4(bank0 & bank1) * 2 < popcount4(bank0))
+        bits &= ~0x08;
+    pci_config_writeb(HB_BDF, 0x50, bits);
+    int votes[6] = { 0 }, best = 5, alias[4];
+    for (int k = 0; k < 4; k++)                     // 64K << k aliases onto 0: the size
+        alias[k] = lanes_equal(l2s_probe(base + (0x10000 << k), 0x11111111 * (k + 1), base, 0xa5a5a5a5), 0xa5a5a5a5);
+    for (int l = 0; l < 4; l++) {
+        if (!(bank0 >> l & 1))
+            continue;
+        int idx = 5;                                 // 1 MB unless a smaller offset aliases
+        for (int k = 3; k >= 0; k--)
+            if (alias[k] >> l & 1)
+                idx = k + 1;                         // 50h size 1 = 64K
+        votes[idx]++;
+    }
+    for (int i = 1; i <= 5; i++)
+        if (votes[i] > votes[best])
+            best = i;
+    return (bits & ~7) | best;
+}
+
+struct l2s_result {
+    u8 bits, lanes;                                  // detected 50h size/banks; lanes that answered
+    u32 bad[2];                                      // data bits that failed, bank 0 and 1
+    u32 tag_lines, tag_fails, tag_and, tag_or, tag_bits, dirty_tested, dirty_fails;
+    u32 tag_kept[4], tag_testable[4];                // uniform tags the tag RAM kept, those testable (bits)
+};
+
+static void
+l2_sram_measure(struct l2s_result *r, u32 base, u8 hb50)
+{
+    struct l2s_vars *v = &L2sVars;
+    int lanes;
+    r->bits = l2_sram_detect(base, hb50, &lanes);
+    r->lanes = lanes;
+    u32 size = l2_size(r->bits), banks = r->bits & 0x08 ? 2 : 1;
+    if (!size)
+        return;
+    pci_config_writeb(HB_BDF, 0x50, r->bits);
+    v->base = base;
+    v->dwords = size / 4;
+    for (u32 key = 0x5aa5c33c, i = 0; i < 2; i++, key = ~key) {   // each cell holds a 0 and a 1
+        v->key = key;
+        l2s_pass();
+        r->bad[0] |= banks == 2 ? v->a2_0 : v->a2_0 | v->a2_1;
+        r->bad[1] |= banks == 2 ? v->a2_1 : 0;
+    }
+    // tags (7 bits, the 8th is the dirty bit: 51h bit 0 clear) on the lanes whose data chips work
+    u32 good = 0;
+    for (int l = 0; l < 4; l++)
+        if (!((r->bad[0] | r->bad[1]) >> (8 * l) & 0xff) && (lanes >> l & 1))
+            good |= 0xffu << (8 * l);
+    u32 ntags = 1, dram_top = ALIGN(LegacyRamSize, 1024*1024);   // above the reserved CBMEM
+    while (ntags < 128 && (ntags * 2) * size <= dram_top)
+        ntags *= 2;
+    r->tag_bits = __builtin_ctz(ntags);
+    if (!good || ntags < 2)
+        return;
+    v->good = good;
+    v->base = ALIGN(base, size);                     // the buffer holds it and 2 more L2 sizes
+    v->size_mask = size - 1;
+    v->lines = size / 16;
+    v->mask_shift = (ntags - 1) * size;
+    v->hb50 = r->bits | 0x80;                        // L2 on, write-through
+    r->tag_and = ~0;
+    for (u32 key = 0x9e3779b1, i = 0; i < 2; i++, key = 0x6c8e9cf5) {
+        v->key = key;
+        v->fails = 0;
+        v->tag_and = ~0;
+        v->tag_or = 0;
+        l2s_tags();
+        r->tag_fails += v->fails;
+        r->tag_and &= v->tag_and;
+        r->tag_or |= v->tag_or;
+        r->tag_lines += size / 16;
+    }
+    r->tag_and = r->tag_fails ? r->tag_and / size : 0;
+    r->tag_or /= size;
+    // the same tag on every line, each value in turn: which values the tag RAM keeps (none: dead or missing)
+    v->key = 0;
+    v->mask_shift = 0;
+    for (u32 t = 0; t < ntags; t++) {
+        v->tag_base = t * size;
+        v->fails = v->tested = 0;
+        l2s_tags();
+        if (v->tested)                               // none: the whole range is in A0000-FFFFF
+            r->tag_testable[t / 32] |= 1u << (t % 32);
+        if (v->tested && v->fails * 2 < v->tested)
+            r->tag_kept[t / 32] |= 1u << (t % 32);
+    }
+    v->tag_base = 0;
+    if (r->tag_fails)
+        return;                                      // a write would miss: the dirty bit cannot be told
+    // two L2 sizes of DRAM the L2 caches (below size << 7), not the buffer: saved there, restored after
+    u32 save = v->base + size, at = 0x100000;
+    while (at < save + 2 * size && at + 2 * size > save)
+        at += 2 * size;
+    if (at + 2 * size > size << 7 || at + 2 * size > dram_top)
+        return;
+    r->dirty_tested = 1;
+    memcpy((void *)save, (void *)at, 2 * size);
+    v->base = at;
+    v->size = size;
+    v->fails = 0;
+    v->hb50 = r->bits | 0xc0;                        // L2 on, write-back
+    l2s_dirty();
+    r->dirty_fails = v->fails;
+    memcpy((void *)at, (void *)save, 2 * size);
+}
+
+static void
+l2_sram_test(void)
+{
+    static const char * const lane_name[4] = { "D0-D7", "D8-D15", "D16-D23", "D24-D31" };
+    char line[80];
+    u8 hb50 = pci_config_readb(HB_BDF, 0x50), hb51 = pci_config_readb(HB_BDF, 0x51);
+    u8 hb55 = pci_config_readb(HB_BDF, 0x55), found = rtc_read(NB_CMOS_L2) & 0x0f;
+    struct l2s_result r;
+    memset(&r, 0, sizeof(r));
+    scr_header("L2 SRAM TEST");
+    info_line(3, "Testing the L2 chips...");
+    void *buf = malloc_tmphigh(4 << 20);             // an L2 size aligned to itself, and two to save DRAM in
+    if (!buf) {
+        info_line(3, "Not enough free memory for the test (4 MB)");
+        goto wait;
+    }
+    if (L2PostHb50) {
+        rtc_write(NB_CMOS_L2, found | 0x80);
+        l2_disable(L2PostHb50);
+        rtc_write(NB_CMOS_L2, found);
+    }
+    u32 flags = save_flags(), cr0 = cr0_read();
+    irq_disable();
+    pci_config_writeb(HB_BDF, 0x55, hb55 & ~0x21);   // BIOS segments out of the L2
+    pci_config_writeb(HB_BDF, 0x51, hb51 & ~1);      // 7 tag bits + dirty bit
+    cr0_write(cr0 | CR0_CD | CR0_NW);
+    wbinvd();
+    l2_sram_measure(&r, ALIGN((u32)buf, 16), hb50);
+    pci_config_writeb(HB_BDF, 0x50, hb50);
+    pci_config_writeb(HB_BDF, 0x51, hb51);
+    pci_config_writeb(HB_BDF, 0x55, hb55);
+    cr0_write(cr0);
+    restore_flags(flags);
+    free(buf);
+    if (L2PostHb50) {                                // its SRAM is overwritten: the POST's init again
+        rtc_write(NB_CMOS_L2, found | 0x80);
+        l2_enable(L2PostHb50, hb51 & 1);
+        rtc_write(NB_CMOS_L2, found);
+    }
+
+    scr_header("L2 SRAM TEST");
+    u32 size = l2_size(r.bits), banks = r.bits & 0x08 ? 2 : 1;
+    if (!size) {
+        info_line(3, "No L2 data SRAM answers (none installed, or the chipset is not a UM8881)");
+        goto wait;
+    }
+    snprintf(line, sizeof(line), "Found: %dK = %d bank%s x 4 chips of %dK x 8 = %d data chips + 1 tag RAM",
+             size >> 10, banks, banks == 2 ? "s" : "", size / banks / 4 >> 10, banks * 4);
+    info_line(3, line);
+    if (l2_size(found) != size || (found & 0x08) != (r.bits & 0x08)) {
+        snprintf(line, sizeof(line), "(the POST's detection found %dK, %d bank%s)", l2_size(found) >> 10,
+                 found & 0x08 ? 2 : 1, found & 0x08 ? "s" : "");
+        info_line(4, line);
+    }
+    if (popcount4(r.lanes) < 4) {
+        snprintf(line, sizeof(line), "Only %d of 4 byte lanes answered the size detection", popcount4(r.lanes));
+        info_line(5, line);
+    }
+    info_line(6, "Data chips  D0-D7     D8-D15    D16-D23   D24-D31");
+    int failed = 0;
+    for (int b = 0; b < banks; b++) {
+        snprintf(line, sizeof(line), "  Bank %d    ", b);
+        for (int l = 0; l < 4; l++) {
+            u8 m = r.bad[b] >> (8 * l);
+            char cell[12];
+            if (!m)
+                snprintf(cell, sizeof(cell), "OK");
+            else if (m == 0xff)
+                snprintf(cell, sizeof(cell), "DEAD");
+            else
+                snprintf(cell, sizeof(cell), "BAD %02x", m);
+            failed += m != 0;
+            int at = 12 + 10 * l, end = at + snprintf(line + at, sizeof(line) - at, "%s", cell);
+            memset(line + end, ' ', at + 10 - end);   // the column is 10 wide
+            line[at + 10] = 0;
+        }
+        scr_puts(7 + b, 3, r.bad[b] ? AttrSelect : AttrText, line);
+    }
+    int row = 10;
+    for (int b = 0; b < banks; b++)
+        for (int l = 0; l < 4; l++) {
+            u8 m = r.bad[b] >> (8 * l);
+            if (!m)
+                continue;
+            snprintf(line, sizeof(line), "FAIL: data chip bank %d, %s: %s", b, lane_name[l],
+                     m == 0xff ? "dead or missing" : "bits stuck or shorted (hex mask above)");
+            scr_puts(row++, 3, AttrSelect, line);
+        }
+    if (!failed) {
+        snprintf(line, sizeof(line), "All %d data chips work.", banks * 4);
+        info_line(row++, line);
+    }
+    if (!r.tag_lines)
+        info_line(row++, "Tag RAM: not tested (no working data lane, or too little RAM)");
+    else if (!r.tag_fails) {
+        snprintf(line, sizeof(line), "Tag RAM: OK (%d tag bits, %d lines x 2); dirty bit: %s", r.tag_bits,
+                 r.tag_lines / 2, !r.dirty_tested ? "not tested" : r.dirty_fails ? "FAIL" : "OK");
+        scr_puts(row++, 3, r.dirty_fails ? AttrSelect : AttrText, line);
+        if (r.dirty_fails) {
+            snprintf(line, sizeof(line), "FAIL: tag RAM bit 7 (dirty): %d written lines never reached DRAM",
+                     r.dirty_fails);
+            scr_puts(row++, 3, AttrSelect, line);
+        }
+    } else {
+        snprintf(line, sizeof(line), "FAIL: tag RAM (the 9th chip): %d of %d lines miss", r.tag_fails, r.tag_lines);
+        scr_puts(row++, 3, AttrSelect, line);
+        u32 ntags = 1 << r.tag_bits, testable = 0, kept = 0, kept_and = ~0, kept_or = 0, one = 0;
+        for (u32 t = 0; t < ntags; t++) {
+            testable += r.tag_testable[t / 32] >> (t % 32) & 1;
+            if (r.tag_kept[t / 32] >> (t % 32) & 1) {
+                kept++;
+                kept_and &= t;
+                kept_or |= t;
+                one = t;
+            }
+        }
+        u32 stuck1 = kept_and & (ntags - 1), stuck0 = ~kept_or & (ntags - 1);
+        if (!kept)
+            snprintf(line, sizeof(line), "  it keeps no tag value: dead, missing, turned or a bad socket contact");
+        else if (kept == 1)
+            snprintf(line, sizeof(line), "  it reads %02x whatever is written: dead or a bad socket contact", one);
+        else if (kept == testable)
+            snprintf(line, sizeof(line), "  every tag value is kept: an address line of it (or of the index)");
+        else {
+            int n = snprintf(line, sizeof(line), "  %d of %d tag values kept:", kept, testable);
+            for (int b = 0; b < r.tag_bits; b++)
+                if ((stuck0 | stuck1) >> b & 1)
+                    n += snprintf(line + n, sizeof(line) - n, " bit %d stuck at %d", b, stuck1 >> b & 1);
+        }
+        scr_puts(row++, 3, AttrSelect, line);
+    }
+    row++;
+    if (banks == 2)
+        info_line(row++, "Bank 0 holds the dwords with A2 = 0, bank 1 those with A2 = 1.");
+    info_line(row++, "To find a chip on the board: power off, remove one, test again: it shows DEAD.");
+wait:
+    scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
+    while (get_keystroke(1000) != 0x01)
+        ;
+}
+
 void
 setup_memtest(void)
 {
@@ -2755,7 +3205,7 @@ setup_memtest(void)
 }
 
 /****************************************************************
- * Benchmarks (SpeedSys style), VGA mode 12h: 640x480, 16 colors, 80x30 text cells
+ * Benchmarks (SpeedSys style), VGA mode 12h: 640x480, 16 colors, black, the 8x8 font: 80x60 text cells
  ****************************************************************/
 
 enum { C_BLACK, C_BLUE, C_GREEN, C_CYAN, C_RED, C_MAGENTA, C_BROWN, C_GRAY, C_DGRAY, C_LBLUE, C_LGREEN, C_LCYAN,
@@ -2769,11 +3219,18 @@ gfx_reg(u8 index, u8 val)
     outb(val, 0x3cf);
 }
 
-// Mode 12h with writes through set/reset (each write paints the bit mask's pixels in the color): 0 without VGA.
+// Mode 12h with writes through set/reset (each write paints the bit mask's pixels in the color) and the video
+// BIOS's 8x8 font (60 rows): 0 without VGA.
 static int
 gfx_open(void)
 {
     int10(0x0012, 0);
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.flags = F_IF;
+    br.ax = 0x1123;                             // 8x8 graphics font, DL rows
+    br.dl = 60;
+    call16_int(0x10, &br);
     return GET_BDA(video_mode) == 0x12;
 }
 
@@ -2834,7 +3291,7 @@ gfx_line(int x0, int y0, int x1, int y1, u8 color)
     }
 }
 
-// Text in the 8x16 cell grid, by the video BIOS (it draws the ROM font in graphics modes).
+// Text in the 8x8 cell grid (row 0-59), by the video BIOS (it draws the ROM font in graphics modes).
 static void
 gfx_text(int row, int col, u8 color, const char *s)
 {
@@ -2858,9 +3315,11 @@ gfx_text(int row, int col, u8 color, const char *s)
 static void
 gfx_title(const char *title)
 {
-    gfx_rect(0, 0, 639, 479, C_BLUE);
-    gfx_text(0, 40 - strlen(title) / 2, C_WHITE, title);
-    gfx_text(29, 1, C_LCYAN, "ESC : Back");
+    gfx_rect(0, 0, 639, 479, C_BLACK);
+    gfx_text(0, 40 - strlen(title) / 2, C_YELLOW, title);
+    gfx_span(0, 639, 10, C_CYAN);
+    gfx_span(0, 639, 469, C_CYAN);
+    gfx_text(59, 1, C_LCYAN, "ESC : Back");
 }
 
 /* Memory: read, write and move speed by block size */
@@ -2885,27 +3344,38 @@ move_block(u32 src, u32 dst, u32 bytes)
     asm volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
 }
 
-// MB/s of one kind on 'block' bytes at src (and dst) for about 20 ms, after one warm-up pass; the timer is read
-// once per 64 KB or more (reading the PIT costs microseconds).
+static void
+mem_kind(int kind, u32 src, u32 dst, u32 bytes)
+{
+    if (kind == 0)
+        read_block(src, bytes);
+    else if (kind == 1)
+        write_block(dst, bytes);
+    else
+        move_block(src, dst, bytes);
+}
+
+// MB/s of one kind on 'block' bytes at src (and dst) for about 20 ms, after one warm-up pass. The timer is read
+// once per 64 KB: not more often (reading the PIT costs microseconds), not less (it wraps every 55 ms, and a
+// large block from DRAM with the L2 off took longer: the lost wrap showed 20 times the speed).
 static u16
 mem_speed(int kind, u32 src, u32 dst, u32 block)
 {
-    u32 done = 0, ticks = 0, reps = block < 0x10000 ? 0x10000 / block : 1;
+    u32 step = block < 0x10000 ? block : 0x10000, span = block < 0x10000 ? 0x10000 : block;
+    u32 done = 0, ticks = 0;
     u32 flags = save_flags();
     irq_disable();
     for (int pass = 0; pass < 2; pass++) {
         u32 t0 = timer_read();
         do {
-            for (u32 r = 0; r < reps; r++) {
-                if (kind == 0)
-                    read_block(src, block);
-                else if (kind == 1)
-                    write_block(dst, block);
-                else
-                    move_block(src, dst, block);
+            for (u32 off = 0; off < span; off += step) {   // a small block again and again, a large one by 64 KB
+                u32 at = off % block;
+                mem_kind(kind, src + at, dst + at, step);
+                if (step == 0x10000)
+                    ticks = timer_read() - t0;
             }
-            done += pass ? reps * block : 0;
             ticks = timer_read() - t0;
+            done += pass ? span : 0;
         } while (pass && ticks < TimerKHz * 20);
     }
     restore_flags(flags);
@@ -2928,10 +3398,10 @@ done:
     free(dst);
 }
 
-#define MCH_X0 64
+#define MCH_X0 56
 #define MCH_X1 616
-#define MCH_Y0 64
-#define MCH_Y1 384
+#define MCH_Y0 40
+#define MCH_Y1 392
 
 static int
 bench_memory(void)
@@ -2945,25 +3415,25 @@ bench_memory(void)
     gfx_text(2, 2, C_WHITE, "Measuring...");
     if (!MemMBs[0][0])
         mem_measure();
-    gfx_rect(16, 32, 300, 47, C_BLUE);
+    gfx_rect(16, 16, 300, 23, C_BLACK);
     for (int k = 0; k < 3; k++)
         for (int i = 0; i < SPEED_POINTS; i++)
             if (MemMBs[k][i] > max)
                 max = MemMBs[k][i];
     max = (max + 49) / 50 * 50;
     gfx_text(2, 2, C_WHITE, "Memory speed (MB/s) by block size");
-    gfx_rect(MCH_X0, MCH_Y0, MCH_X1, MCH_Y1, C_BLACK);
     for (int g = 0; g <= 4; g++) {              // grid and MB/s scale
         int y = MCH_Y1 - g * (MCH_Y1 - MCH_Y0) / 4;
         gfx_span(MCH_X0, MCH_X1, y, C_DGRAY);
         snprintf(text, sizeof(text), "%d", max * g / 4);
-        gfx_text(y / 16, MCH_X0 / 8 - 1 - strlen(text), C_WHITE, text);
+        gfx_text((y - 4) / 8, MCH_X0 / 8 - 1 - strlen(text), C_WHITE, text);
     }
     for (int i = 0; i < ARRAY_SIZE(size); i++) {
         int x = MCH_X0 + i * 4 * (MCH_X1 - MCH_X0) / (SPEED_POINTS - 1);
         gfx_rect(x, MCH_Y0, x, MCH_Y1, C_DGRAY);
-        gfx_text(MCH_Y1 / 16 + 1, x / 8 - strlen(size[i]) / 2, C_WHITE, size[i]);
+        gfx_text(MCH_Y1 / 8 + 1, x / 8 - strlen(size[i]) / 2, C_WHITE, size[i]);
     }
+    gfx_frame(MCH_X0, MCH_Y0, MCH_X1, MCH_Y1, C_CYAN);
     for (int k = 0; k < 3; k++) {
         int x0 = -1, y0 = 0;
         for (int i = 0; i < SPEED_POINTS && MemMBs[k][i]; i++) {
@@ -2976,7 +3446,7 @@ bench_memory(void)
         }
         snprintf(text, sizeof(text), "%s: %d MB/s at 4K, %d MB/s at 2M", names[k], MemMBs[k][0],
                  MemMBs[k][SPEED_POINTS - 1]);
-        gfx_text(26 + k, 8, colors[k], text);
+        gfx_text(53 + k, 8, colors[k], text);
     }
     return 0;
 }
@@ -3046,21 +3516,22 @@ gfx_bar(int y, const char *title, u32 value, const char *unit, const char * cons
         if (ref_value[r] > max)
             max = ref_value[r];
     max += max / 10 + 1;
-    gfx_frame(16, y, 623, y + 95, C_LCYAN);
-    gfx_text(y / 16, 4, C_LCYAN, title);
-    gfx_rect(40, y + 40, 600, y + 55, C_BLACK);
-    gfx_rect(40, y + 40, 40 + value * 560 / max, y + 55, C_LBLUE);
+    gfx_frame(16, y, 623, y + 111, C_CYAN);     // y: a multiple of 8, the text rows line up
+    gfx_text(y / 8 + 1, 3, C_LCYAN, title);
+    gfx_frame(39, y + 47, 601, y + 64, C_DGRAY);
+    gfx_rect(40, y + 48, 40 + value * 560 / max, y + 63, C_LBLUE);
     for (int r = 0; r < refs; r++) {            // references alternately above and below the scale
         int x = 40 + ref_value[r] * 560 / max, up = r & 1;
-        gfx_rect(x, up ? y + 30 : y + 56, x, up ? y + 39 : y + 64, C_WHITE);
+        gfx_rect(x, up ? y + 38 : y + 65, x, up ? y + 46 : y + 73, C_WHITE);
         int col = x / 8 - strlen(ref_name[r]) / 2;
-        gfx_text((up ? y + 16 : y + 66) / 16, col < 3 ? 3 : col, C_WHITE, ref_name[r]);
+        gfx_text(up ? y / 8 + 3 : y / 8 + 10, col < 3 ? 3 : col > 77 - (int)strlen(ref_name[r])
+                 ? 77 - strlen(ref_name[r]) : col, C_GRAY, ref_name[r]);
     }
     if (decimals)
-        snprintf(text, sizeof(text), " %d.%d %s ", value / 1000, value % 1000 / 100, unit);
+        snprintf(text, sizeof(text), "%d.%d %s", value / 1000, value % 1000 / 100, unit);
     else
-        snprintf(text, sizeof(text), " %d %s ", value, unit);
-    gfx_text((y + 40) / 16, 6, C_YELLOW, text);
+        snprintf(text, sizeof(text), "%d %s", value, unit);
+    gfx_text(y / 8 + 12, 5, C_YELLOW, text);
 }
 
 // The 486-class CPUs (Intel and AMD cores: the same clocks per instruction, so speed scales with the core clock).
@@ -3074,7 +3545,7 @@ bench_cpu(void)
 {
     char vendor[13], text[80];
     u32 fms = 0, features, refs = 0, alu, fpu, ref_alu[7], ref_fpu[7];
-    int mhz, row = 2;
+    int mhz, row = 3;
     const char *name = cpu_short_name(&mhz);
     int known = cpu_ident(vendor, &fms, &features) && (fms >> 8 & 15) == 4
         && (!strcmp(vendor, "GenuineIntel") || !strcmp(vendor, "AuthenticAMD"));
@@ -3082,7 +3553,7 @@ bench_cpu(void)
     gfx_text(row, 2, C_WHITE, "Measuring...");
     alu = cpu_alu_mips();
     fpu = cpu_fpu_mflops();
-    gfx_rect(16, 32, 300, 47, C_BLUE);
+    gfx_rect(16, 24, 300, 31, C_BLACK);
     snprintf(text, sizeof(text), "Processor   : %s, %d MHz (measured)", name, mhz);
     gfx_text(row++, 2, C_WHITE, text);
     snprintf(text, sizeof(text), "CPUID       : %s family %d model %d stepping %d", vendor, fms >> 8 & 15, fms >> 4 & 15,
@@ -3105,16 +3576,16 @@ bench_cpu(void)
             ref_fpu[refs] = refs ? fpu * RefMhz[refs] / mhz : 0;   // the 486SX has no FPU
         }
     }
-    gfx_bar(176, "Integer (ALU) speed, million instructions/s", alu, "MIPS", RefCpu, ref_alu, refs, 0);
+    gfx_bar(96, "Integer (ALU) speed, million instructions/s", alu, "MIPS", RefCpu, ref_alu, refs, 0);
     if (fpu)
-        gfx_bar(288, "Floating point (FPU) speed, million operations/s", fpu, "MFLOPS", RefCpu + 1, ref_fpu + 1,
+        gfx_bar(224, "Floating point (FPU) speed, million operations/s", fpu, "MFLOPS", RefCpu + 1, ref_fpu + 1,
                 refs ? refs - 1 : 0, 1);
     else
-        gfx_text(19, 4, C_LCYAN, "No FPU");
-    gfx_text(26, 2, C_GRAY, known ? "References: Intel and AMD 486-class cores run these loops in the same clocks:"
+        gfx_text(30, 4, C_LCYAN, "No FPU");
+    gfx_text(46, 2, C_GRAY, known ? "References: Intel and AMD 486-class cores run these loops in the same clocks:"
              : "No references: this CPU's clocks per instruction differ from the 486's");
     if (known)
-        gfx_text(27, 2, C_GRAY, "their speed is this CPU's per MHz times their clock.");
+        gfx_text(47, 2, C_GRAY, "their speed is this CPU's per MHz times their clock.");
     return 0;
 }
 
@@ -3255,49 +3726,49 @@ hd_progress(int percent)
 {
     char text[16];
     snprintf(text, sizeof(text), "%d%%   ", percent);
-    gfx_text(10, 60, C_WHITE, text);
+    gfx_text(12, 66, C_WHITE, text);
 }
 
-#define HCH_X0 368
-#define HCH_X1 624
-#define HCH_Y0 192
-#define HCH_Y1 400
+#define HCH_X0 56
+#define HCH_X1 616
+#define HCH_Y0 152
+#define HCH_Y1 392
 
 static void
 hd_show(int h)
 {
     char text[80];
     u32 max = 1;
-    gfx_rect(8, 112, 631, 463, C_BLUE);
+    gfx_rect(0, 88, 639, 467, C_BLACK);
     if (Hd[h].error) {
         snprintf(text, sizeof(text), HdErrors[Hd[h].error], Hd[h].err_lba);
-        gfx_text(8, 2, C_LRED, text);
+        gfx_text(12, 2, C_LRED, text);
         Hd[h].error = Hd[h].error == HD_ABORTED ? 0 : Hd[h].error;   // stopped: may run again
         return;
     }
     snprintf(text, sizeof(text), "Maximal seek time     : %d.%02d ms", Hd[h].max_seek_us / 1000,
              Hd[h].max_seek_us % 1000 / 10);
-    gfx_text(8, 2, C_LRED, text);
+    gfx_text(12, 2, C_LRED, text);
     snprintf(text, sizeof(text), "Average (random) seek : %d.%02d ms", Hd[h].avg_seek_us / 1000,
              Hd[h].avg_seek_us % 1000 / 10);
-    gfx_text(9, 2, C_LMAGENTA, text);
+    gfx_text(13, 2, C_LMAGENTA, text);
     snprintf(text, sizeof(text), "Track-to-track seek   : %d.%02d ms", Hd[h].t2t_us / 1000, Hd[h].t2t_us % 1000 / 10);
-    gfx_text(10, 2, C_LGREEN, text);
+    gfx_text(14, 2, C_LGREEN, text);
     snprintf(text, sizeof(text), "Buffered read speed   : %d KB/s", Hd[h].buffered_kbs);
-    gfx_text(11, 2, C_LCYAN, text);
+    gfx_text(15, 2, C_LCYAN, text);
     snprintf(text, sizeof(text), "Linear read speed     : %d KB/s", Hd[h].avg_kbs);
-    gfx_text(12, 2, C_YELLOW, text);
+    gfx_text(16, 2, C_YELLOW, text);
     for (int t = 0; t < HD_POINTS; t++)
         if (Hd[h].kbs[t] > max)
             max = Hd[h].kbs[t];
     max = (max + 499) / 500 * 500;
-    gfx_rect(HCH_X0, HCH_Y0, HCH_X1, HCH_Y1, C_BLACK);
     for (int g = 0; g <= 4; g++) {
         int y = HCH_Y1 - g * (HCH_Y1 - HCH_Y0) / 4;
         gfx_span(HCH_X0, HCH_X1, y, C_DGRAY);
         snprintf(text, sizeof(text), "%d", max * g / 4);
-        gfx_text(y / 16, HCH_X0 / 8 - 1 - strlen(text), C_YELLOW, text);
+        gfx_text((y - 4) / 8, HCH_X0 / 8 - 1 - strlen(text), C_YELLOW, text);
     }
+    gfx_frame(HCH_X0, HCH_Y0, HCH_X1, HCH_Y1, C_CYAN);
     int x0 = -1, y0 = 0;
     for (int t = 0; t < HD_POINTS; t++) {
         int x = HCH_X0 + t * (HCH_X1 - HCH_X0) / (HD_POINTS - 1);
@@ -3309,9 +3780,10 @@ hd_show(int h)
         x0 = x;
         y0 = y;
     }
-    gfx_text(HCH_Y1 / 16 + 1, HCH_X0 / 8, C_YELLOW, "read KB/s");
-    gfx_text(HCH_Y1 / 16 + 1, HCH_X0 / 8 + 13, C_LGREEN, "access 0-40 ms");
-    gfx_text(HCH_Y1 / 16 + 2, HCH_X0 / 8, C_WHITE, "start of the disk          end");
+    gfx_text(HCH_Y1 / 8 + 1, HCH_X0 / 8, C_WHITE, "start of the disk");
+    gfx_text(HCH_Y1 / 8 + 1, HCH_X1 / 8 - 10, C_WHITE, "end of it");
+    gfx_text(HCH_Y1 / 8 + 3, HCH_X0 / 8, C_YELLOW, "- read speed, KB/s");
+    gfx_text(HCH_Y1 / 8 + 3, HCH_X0 / 8 + 24, C_LGREEN, ". access time, 0-40 ms");
 }
 
 static int
@@ -3328,10 +3800,10 @@ bench_disk(void)
     for (;;) {
         for (int h = 0; h < HdCount; h++) {
             snprintf(text, sizeof(text), "%c %s, %d MB", h == sel ? '>' : ' ', Hd[h].name, Hd[h].sectors / 2048);
-            gfx_rect(8, (2 + h) * 16, 631, (3 + h) * 16 - 1, C_BLUE);
+            gfx_rect(8, (2 + h) * 8, 631, (3 + h) * 8 - 1, C_BLACK);
             gfx_text(2 + h, 2, h == sel ? C_YELLOW : C_WHITE, text);
         }
-        gfx_text(29, 20, C_LCYAN, "\x18\x19 : Select disk   Enter : Test it");
+        gfx_text(59, 20, C_LCYAN, "\x18\x19 : Select disk   Enter : Test it");
         int key = get_keystroke(1000);
         if (key == 0x01)
             return 1;                           // ESC taken
@@ -3340,8 +3812,8 @@ bench_disk(void)
         if (key == 0x50 && sel < HdCount - 1)
             sel++;
         if (key == 0x1c) {
-            gfx_rect(8, 112, 631, 463, C_BLUE);
-            gfx_text(10, 2, C_WHITE, "Testing (seek, then reading across the disk), ESC stops...");
+            gfx_rect(0, 88, 639, 467, C_BLACK);
+            gfx_text(12, 2, C_WHITE, "Testing (seek, then reading across the disk), ESC stops...");
             hd_test(sel, hd_progress);
             hd_show(sel);
         }
@@ -3363,15 +3835,15 @@ bench_disk_bars(void)
     for (int h = 0; h < HdCount && h < 3; h++)
         if (!Hd[h].tested && !Hd[h].error)
             hd_test(h, NULL);
-    gfx_rect(8, 32, 631, 47, C_BLUE);
+    gfx_rect(8, 16, 631, 23, C_BLACK);
     for (int h = 0; h < HdCount && shown < 3; h++) {
         if (Hd[h].error)
             continue;
-        gfx_bar(32 + shown++ * 112, Hd[h].name, Hd[h].avg_kbs, "KB/s linear read", RefPio, RefPioKbs, 5, 0);
+        gfx_bar(24 + shown++ * 128, Hd[h].name, Hd[h].avg_kbs, "KB/s linear read", RefPio, RefPioKbs, 5, 0);
     }
     if (!shown)
         gfx_text(3, 2, C_WHITE, "No hard disk could be read");
-    gfx_text(27, 2, C_GRAY, "References: the transfer limit of each ATA PIO mode.");
+    gfx_text(56, 2, C_GRAY, "References: the transfer limit of each ATA PIO mode.");
     return 0;
 }
 
