@@ -419,7 +419,8 @@ build_usb_path(char *buf, int max, struct usbhub_s *hub)
     return p;
 }
 
-int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
+static int
+bootprio_find_usb_path(struct usbdevice_s *usbdev, int lun)
 {
     if (!CONFIG_BOOTORDER)
         return -1;
@@ -445,6 +446,14 @@ int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
     // Try usb-host/redir - for example: /pci@i0cf8/usb@1,2/usb-host@1
     snprintf(p, desc+sizeof(desc)-p, "/usb-*@%x", usb_portmap(usbdev));
     return find_prio(desc);
+}
+
+static int DefaultUSBPrio = -1;   // setup's USB boot position; -1: USB drives go with the hard disks
+
+int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
+{
+    int prio = bootprio_find_usb_path(usbdev, lun);
+    return prio >= 0 ? prio : DefaultUSBPrio;
 }
 
 
@@ -490,6 +499,7 @@ boot_init(void)
             case 2: DefaultHDPrio = i;     break;
             case 3: DefaultCDPrio = i;     break;
             case 4: DefaultBEVPrio = i;    break;
+            case 5: DefaultUSBPrio = i;    break;
             }
         }
     }

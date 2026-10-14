@@ -9,6 +9,7 @@
 #define NB_CMOS_L2        0x3e   /* L2 size and bank bits found by coreboot (UM8881 50h & 0Fh); L2 stays off until SeaBIOS;
                                     bit 7: SeaBIOS is enabling the L2 (still set at the next POST: that hung);
                                     bits 6-4: its step then (setup.c L2StepNames) */
+#define NB_CMOS_LASTPOST  0x3f   /* last SeaBIOS POST code: where an unfinished POST stopped */
 #define NB_CMOS_BASE      0x40
 #define NB_CMOS_HDD       0x62   /* 4 x 5 bytes per IDE drive: type, user cylinders (16-bit), heads, sectors */
 #define NB_CMOS_PASSWORD  0x78   /* 16-bit hash, 0 = no password */
@@ -29,7 +30,7 @@ enum nb_setting {
 	NB_HALT_ON,                             /* 0 all errors, 1 none, 2 all but keyboard, 3 diskette, 4 disk/key */
 	/* BIOS features */
 	NB_L1_CACHE, NB_L2_CACHE,               /* 0 disabled, 1 enabled */
-	NB_BOOT1, NB_BOOT2, NB_BOOT3, NB_BOOT4, /* 1 floppy, 2 hard disk, 3 CD-ROM, 4 network */
+	NB_BOOT1, NB_BOOT2, NB_BOOT3, NB_BOOT4, /* 1 floppy, 2 hard disk, 3 CD-ROM, 4 network, 5 USB */
 	NB_BOOT_DELAY,                          /* setup prompt: 0 1 s, 1 2 s, 2 3 s, 3 5 s */
 	NB_SWAP_FLOPPY, NB_NUMLOCK,
 	NB_TYPEMATIC, NB_TYPEMATIC_RATE, NB_TYPEMATIC_DELAY,  /* rate 6..30 chars/s, delay 250..1000 ms */
