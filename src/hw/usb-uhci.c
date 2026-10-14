@@ -226,7 +226,9 @@ configure_uhci(void *data)
     outw(USBCMD_RS | USBCMD_CF | USBCMD_MAXP, cntl->iobase + USBCMD);
 
     // Find devices
+    post_code(POST_USB_UHCI_PORTS);
     int count = check_uhci_ports(cntl);
+    post_code(POST_USB_UHCI_DONE);
     uhci_free_pipes(cntl);
     if (count)
         // Success

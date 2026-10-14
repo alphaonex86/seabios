@@ -347,6 +347,8 @@ scsi_drive_setup(struct drive_s *drive, const char *s, int prio)
         return -1;
 
     ret = scsi_is_ready(&dop);
+    if (!ret)
+        post_code(POST_DISK_READY);
     if (ret) {
         dprintf(1, "scsi_is_ready returned %d\n", ret);
         return ret;

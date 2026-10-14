@@ -22,9 +22,11 @@
 #include "string.h" // memset
 #include "util.h" // setup_menu
 #include "x86.h" // cpuid
+#include "post_serial.h" // post_serial (after x86.h: inb, outb)
 
 u8 Setting[NB_COUNT];
 static int SetupDefaulted, ChipsetFallback, PrevPostCode;   // POST warnings, see setup_post_warnings()
+static int PostWarned;                                       // warnings shown, the boot goes on: a longer prompt
 u8 SetupL1Off VARFSEG;                          // "CPU Internal Cache" disabled, for handle_resume()
 static u16 Password;   // hash, 0 = none
 
@@ -347,6 +349,7 @@ void
 post_code(u8 code)
 {
     outb(code, 0x80);
+    post_serial(code);
     if (PrevLastPost < 0)
         PrevLastPost = rtc_read(NB_CMOS_LASTPOST);
     rtc_write(NB_CMOS_LASTPOST, code);
@@ -406,7 +409,7 @@ setup_post_warnings(void)
     if (!(errors & halts[Setting[NB_HALT_ON]])) {
         if (errors) {
             printf("WARNING: POST errors above, boot continues (Halt On)\n");
-            msleep(3000);
+            PostWarned = 1;   // the boot prompt then lasts 3 s, time to read them (not 3 s more before it)
         }
         return;
     }
@@ -444,6 +447,7 @@ setup_init(void)
         memcpy(Setting, Defaults, sizeof(Setting));
     }
     cmos_write(Setting, Hdd, Password);
+    floppy_motors_early((Setting[NB_FLOPPY_A] ? 1 : 0) | (Setting[NB_FLOPPY_B] ? 2 : 0));
     superio_apply();
     ide_channels_apply();
     return Setting[NB_BOOT1] | Setting[NB_BOOT2] << 4 | Setting[NB_BOOT3] << 8
@@ -471,7 +475,8 @@ u32
 setup_boot_delay(void)
 {
     static const u16 ms[] = { 1000, 2000, 3000, 5000 };
-    return ms[Setting[NB_BOOT_DELAY] & 3];
+    u32 delay = ms[Setting[NB_BOOT_DELAY] & 3];
+    return PostWarned && delay < 3000 ? 3000 : delay;
 }
 
 int
@@ -2269,27 +2274,31 @@ memtest_key(void)
     return scan == 0x01;
 }
 
-// Test the dwords 'step' apart in one 4 KiB block without losing them (POST data lives in this RAM):
-// two patterns, each written, flushed from the internal cache and read back. This runs before the L2 is
-// enabled (setup_l2_cache), as by the original BIOS: on this chipset a flush also empties the L2.
-static int
-memtest_block(u32 *block, u32 *save, int step)
+// Test the dwords 'step' apart in n dwords from block without losing them (POST data lives in this RAM):
+// two patterns, each written, flushed from the internal cache and read back; returns the first failing
+// address (0: none). This runs before the L2 is enabled (setup_l2_cache), as by the original BIOS: on this
+// chipset a flush also empties the L2.
+static u32
+memtest_block(u32 *block, u32 *save, int n, int step)
 {
-    int i, bad = 0, n = 1024;
+    u32 bad = 0;
+    int i;
     for (i = 0; i < n; i += step)
-        save[i] = block[i];
+        save[i / step] = block[i];
     for (i = 0; i < n; i += step)
         block[i] = (u32)&block[i] ^ 0x5aa5a55a;
     wbinvd();
     for (i = 0; i < n; i += step)
-        bad |= block[i] != ((u32)&block[i] ^ 0x5aa5a55a);
+        if (block[i] != ((u32)&block[i] ^ 0x5aa5a55a) && !bad)
+            bad = (u32)&block[i];
     for (i = 0; i < n; i += step)
         block[i] = ~((u32)&block[i] ^ 0x5aa5a55a);
     wbinvd();
     for (i = 0; i < n; i += step)
-        bad |= block[i] != ~((u32)&block[i] ^ 0x5aa5a55a);
+        if (block[i] != ~((u32)&block[i] ^ 0x5aa5a55a) && (!bad || (u32)&block[i] < bad))
+            bad = (u32)&block[i];
     for (i = 0; i < n; i += step)
-        block[i] = save[i];
+        block[i] = save[i / step];
     return bad;
 }
 
@@ -2307,21 +2316,26 @@ memtest_show(u32 kb, const char *result)
 static void
 memtest(void)
 {
-    u32 *save = malloc_tmphigh(4096), start, end, a, bad = 0;
+    u32 *save = malloc_tmphigh(4096), start, end, a, len, bad = 0;
     int step = Setting[NB_QUICK_POST] ? 256 : 1, n, skipped = 0;
     u32 kb = 1024, total = 1024 + ext_mem_kb();
     char fail[40];
     if (!save)
         return;
     scr_puts(23, 0, AttrText, "Press DEL to enter SETUP, ESC to skip memory test");   // keyboard ready
+    u32 chunk = 4096 * step;   // its tested dwords fill the 4 KiB save buffer: one cache flush per chunk
     for (n = 0; !skipped && malloc_tmphigh_free(n, &start, &end); n++) {
-        for (a = ALIGN(start, 4096); a + 4096 <= end && !skipped; a += 4096, kb += 4) {
+        for (a = ALIGN(start, 4096); a + 4096 <= end && !skipped; a += len) {
+            len = end - a < chunk ? ALIGN_DOWN(end - a, 4096) : chunk;
             u32 flags = save_flags();
             irq_disable();
-            if (memtest_block((void*)a, save, step) && !bad)
-                bad = a;
+            u32 b = memtest_block((void*)a, save, len / 4, step);
+            if (!bad)
+                bad = b;
             restore_flags(flags);
-            if (!(kb & 1023)) {
+            u32 mb = kb >> 10;
+            kb += len >> 10;
+            if (kb >> 10 != mb) {
                 memtest_show(kb, "");
                 skipped = memtest_key();
             }

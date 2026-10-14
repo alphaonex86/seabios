@@ -521,6 +521,8 @@ usb_hub_port_setup(void *data)
     // Configure the device
     int count = configure_usb_device(usbdev);
     usb_free_pipe(usbdev, usbdev->defpipe);
+    if (count)
+        post_code(POST_USB_DEVICE);
     if (!count)
         hub->op->disconnect(hub, port);
     hub->devcount += count;
@@ -578,6 +580,7 @@ usb_setup(void)
     if (! CONFIG_USB)
         return;
     dprintf(3, "init usb\n");
+    post_code(POST_USB);
     usb_time_sigatt = romfile_loadint("etc/usb-time-sigatt", USB_TIME_SIGATT);
     xhci_setup();
     ehci_setup();
