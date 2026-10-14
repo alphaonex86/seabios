@@ -56,6 +56,9 @@ extern u8 ApmEnabled;
 enum { POST_SEABIOS = 0xb0, POST_PLATFORM, POST_VGA, POST_BANNER, POST_DEVICES, POST_MEMTEST,
        POST_OPTIONROMS, POST_SUMMARY, POST_PROMPT, POST_SETUP, POST_SETUP_MEMTEST, POST_PREPBOOT,
        POST_BOOT, POST_NO_BOOT };
+// USB setup, in its threads (they interleave with the codes above): the time of each step on a COM1 capture
+enum { POST_USB = 0xd0, POST_USB_EHCI_PORTS, POST_USB_EHCI_DONE, POST_USB_UHCI_PORTS, POST_USB_UHCI_DONE,
+       POST_USB_DEVICE, POST_DISK_READY };
 void post_code(u8 code);
 extern int SetupRequested, SetupBootMenu;
 extern u8 SetupL1Off;
@@ -211,6 +214,7 @@ void dma_setup(void);
 extern struct floppy_ext_dbt_s diskette_param_table2;
 void floppy_setup(void);
 int floppy_drive_check(u8 floppyid);
+void floppy_motors_early(int drives);
 struct drive_s *init_floppy(int floppyid, int ftype);
 int find_floppy_type(u32 size);
 int floppy_process_op(struct disk_op_s *op);

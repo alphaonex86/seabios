@@ -276,7 +276,9 @@ configure_ehci(void *data)
     PendingEHCI--;
 
     // Find devices
+    post_code(POST_USB_EHCI_PORTS);
     int count = check_ehci_ports(cntl);
+    post_code(POST_USB_EHCI_DONE);
     ehci_free_pipes(cntl);
     if (count)
         // Success
@@ -290,6 +292,17 @@ fail:
     free(intr_qh);
     free(async_qh);
     free(cntl);
+}
+
+static int
+ehci_wait_halted(struct usb_ehci_s *cntl, u32 ms)
+{
+    u32 end = timer_calc(ms), sts;
+    while (!((sts = readl(&cntl->regs->usbsts)) & STS_HALT) || sts == ~0   // all ones: not answering
+           || readl(&cntl->regs->usbcmd) & CMD_HCRESET)
+        if (timer_check(end))
+            return 0;
+    return 1;
 }
 
 static void
@@ -318,16 +331,18 @@ ehci_controller_setup(struct pci_device *pci)
     dprintf(1, "EHCI init on dev %pP (regs=%p)\n", pci, cntl->regs);
 
     // Halt it before bus mastering (at most 16 microframes): after a warm boot the controller may still run
-    // the schedule an OS left in RAM.
+    // the schedule an OS left in RAM. One that does not stop (a VIA after DOS's jmp FFFF:0) halts on HCRESET.
     writel(&cntl->regs->usbcmd, readl(&cntl->regs->usbcmd) & ~(CMD_RUN | CMD_ASE | CMD_PSE));
-    u32 end = timer_calc(5), sts;
-    while (!((sts = readl(&cntl->regs->usbsts)) & STS_HALT) || sts == ~0)   // all ones: not answering
-        if (timer_check(end)) {
+    if (!ehci_wait_halted(cntl, 5)) {
+        dprintf(1, "EHCI %pP does not halt: HCRESET\n", pci);
+        writel(&cntl->regs->usbcmd, CMD_HCRESET);
+        if (!ehci_wait_halted(cntl, 250)) {
             dprintf(1, "EHCI %pP does not halt: left off\n", pci);
             PendingEHCI--;
             free(cntl);
             return;
         }
+    }
 
     pci_enable_busmaster(pci);
 
