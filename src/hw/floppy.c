@@ -379,8 +379,8 @@ floppy_drive_pio(u8 floppyid, int command, u8 *param)
     u8 motor_mask = FLOPPY_DOR_MOTOR_A << floppyid;
     int motor_already_running = floppy_dor_read() & motor_mask;
 
-    // Turn on motor of selected drive, DMA & int enabled, normal operation
-    floppy_dor_write(motor_mask | FLOPPY_DOR_IRQ | FLOPPY_DOR_RESET | floppyid);
+    // Turn on motor of selected drive (the others spinning keep on: INT 08 stops them), DMA & int enabled
+    floppy_dor_write((floppy_dor_read() & 0xf0) | motor_mask | FLOPPY_DOR_IRQ | FLOPPY_DOR_RESET | floppyid);
 
     // If the motor was just started, wait for it to get up to speed
     if (!motor_already_running && !CONFIG_QEMU)
@@ -420,13 +420,24 @@ floppy_drive_recal(u8 floppyid)
     return DISK_RET_SUCCESS;
 }
 
+// Motors of the drives set up in CMOS on early in the POST (bit 0: drive 0, bit 1: drive 1): spun up by
+// floppy_drive_check() at the boot prompt, which then skips its 1 s wait.
+void
+floppy_motors_early(int drives)
+{
+    if (!CONFIG_FLOPPY || !drives)
+        return;
+    SET_BDA(floppy_motor_counter, 255);
+    floppy_dor_mask(0, (drives & 3) * FLOPPY_DOR_MOTOR_A);
+}
+
 // POST check of a drive set up in CMOS: recalibrate it; -1 if it did not reach track 0.
 int
 floppy_drive_check(u8 floppyid)
 {
     u8 param[2] = { floppyid };
     int ret = floppy_drive_pio(floppyid, FC_RECALIBRATE, param);
-    floppy_dor_write(FLOPPY_DOR_IRQ | FLOPPY_DOR_RESET);   // motor off
+    floppy_dor_mask(FLOPPY_DOR_MOTOR_A << floppyid, 0);   // its motor off
     return ret || (param[0] & 0xd0) ? -1 : 0;   // ST0: abnormal end or equipment check
 }
 

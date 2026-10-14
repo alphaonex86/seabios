@@ -17,7 +17,7 @@
 #define NB_CMOS_SUM       0x7c   /* big-endian 16-bit sum of NB_CMOS_BASE..NB_CMOS_SIG */
 #define NB_CMOS_BOOTFAIL  0x7e   /* POSTs started (coreboot) since the last completed one (SeaBIOS) */
 #define NB_CMOS_CPUSIG    0x7f   /* CPU family << 4 | model from DX at reset (bootblock), for CPUs without CPUID */
-#define NB_SIG_VALUE      0xa6   /* layout version: change when indexes or meanings change */
+#define NB_SIG_VALUE      0xa7   /* layout version: change when indexes, meanings or defaults change (test/cmoslayout.sh) */
 #define NB_LAYOUT_COUNT   65     /* NB_COUNT of this version (setup.c checks it) */
 #define NB_BOOTFAIL_MAX   2      /* coreboot falls back to chipset defaults after this many failures */
 #define NB_HDD_NONE       1      /* drive types: 0 auto, 1 none, 2-47 type 1-46 (16: reserved 15), 48 user */
