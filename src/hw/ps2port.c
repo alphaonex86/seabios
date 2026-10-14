@@ -558,13 +558,17 @@ ps2_keyboard_init(void)
 
 // After power-on the controller and the keyboard may still be in their self tests: retry for 3 s, as
 // the original BIOS waits (a cold boot reported no keyboard on the real board, a reset found it).
+// A keyboard still silent then is left enabled, as the original BIOS does: one that wakes up later types.
 static void
 ps2_keyboard_setup(void *data)
 {
     u32 end = timer_calc(3000);
     while (ps2_keyboard_init()) {
-        if (timer_check(end))
+        if (timer_check(end)) {
+            Ps2ctr = I8042_CTR_AUXDIS | I8042_CTR_XLATE | (CONFIG_HARDWARE_IRQ ? I8042_CTR_KBDINT : 0);
+            ps2_kbd_command(ATKBD_CMD_ENABLE, NULL);
             return;
+        }
         msleep(100);
     }
     dprintf(1, "PS2 keyboard initialized\n");

@@ -8,6 +8,8 @@
 #include "config.h" // CONFIG_*
 #include "farptr.h" // FLATPTR_TO_SEGOFF
 #include "hw/pci.h" // pci_reboot
+#include "hw/pci_ids.h" // PCI_BASE_CLASS_BRIDGE
+#include "hw/pci_regs.h" // PCI_COMMAND
 #include "hw/pic.h" // pic_eoi2
 #include "hw/ps2port.h" // i8042_reboot
 #include "hw/rtc.h" // rtc_read
@@ -122,11 +124,23 @@ s3_resume(void)
     farcall16big(&br);
 }
 
+// Bus masters off (USB schedules, network receive rings): a warm reset does not reset the cards, and they
+// would keep writing to memory while the next POST sets up the DRAM and runs from the L1 cache (cache-as-RAM).
+static void
+pci_bus_masters_off(void)
+{
+    for (int bdf = 0; bdf < 0x100; bdf++)
+        if (pci_config_readw(bdf, PCI_VENDOR_ID) != 0xffff
+            && pci_config_readw(bdf, PCI_CLASS_DEVICE) >> 8 != PCI_BASE_CLASS_BRIDGE)
+            pci_config_maskw(bdf, PCI_COMMAND, PCI_COMMAND_MASTER, 0);
+}
+
 // Attempt to invoke a hard-reboot.
 static void
 tryReboot(void)
 {
     dprintf(1, "Attempting a hard reboot\n");
+    pci_bus_masters_off();
 
     // Use a QEMU specific reboot on QEMU
     // qemu_reboot();
