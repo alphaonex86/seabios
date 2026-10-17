@@ -32,7 +32,7 @@ void
 debug_banner(void)
 {
     dprintf(1, "SeaBIOS (version %s)\n", VERSION);
-    dprintf(1, "BUILD: %s\n", BUILDINFO);
+    dprintf(3, "BUILD: %s\n", BUILDINFO);
 }
 
 // Write a character to debug port(s).
@@ -398,25 +398,30 @@ putc_str(struct putcinfo *info, char c)
     sinfo->str++;
 }
 
-// Build a formatted string.  Note, this function returns the actual
-// number of bytes used (not including null) even in the overflow
-// case.
+// Build a formatted string: the number of bytes written (not including null), size - 1 at most.
 int
-snprintf(char *str, size_t size, const char *fmt, ...)
+vsnprintf(char *str, size_t size, const char *fmt, va_list args)
 {
     ASSERT32FLAT();
     if (!size)
         return 0;
     struct snprintfinfo sinfo = { { putc_str }, str, str + size };
-    va_list args;
-    va_start(args, fmt);
     bvprintf(&sinfo.info, fmt, args);
-    va_end(args);
     char *end = sinfo.str;
     if (end >= sinfo.end)
         end = sinfo.end - 1;
     *end = '\0';
     return end - str;
+}
+
+int
+snprintf(char *str, size_t size, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int ret = vsnprintf(str, size, fmt, args);
+    va_end(args);
+    return ret;
 }
 
 // Build a formatted string - malloc'ing the memory.
@@ -431,15 +436,10 @@ znprintf(size_t size, const char *fmt, ...)
         warn_noalloc();
         return NULL;
     }
-    struct snprintfinfo sinfo = { { putc_str }, str, str + size };
     va_list args;
     va_start(args, fmt);
-    bvprintf(&sinfo.info, fmt, args);
+    vsnprintf(str, size, fmt, args);
     va_end(args);
-    char *end = sinfo.str;
-    if (end >= sinfo.end)
-        end = sinfo.end - 1;
-    *end = '\0';
     return str;
 }
 
@@ -501,92 +501,90 @@ __debug_enter(struct bregs *regs, const char *fname)
     dump_regs(regs);
 }
 
+#define CALLER ((u32)__builtin_return_address(0))
+
 // Send debugging output info.
 void
-__debug_stub(struct bregs *regs, int lineno, const char *fname)
+__debug_stub(struct bregs *regs, int lineno)
 {
-    dprintf(1, "stub %s:%d:\n", fname, lineno);
+    dprintf(1, "stub at %x line %d:\n", CALLER, lineno);
     dump_regs(regs);
+}
+
+// A warning at the caller's address and source line; the registers too at DEBUG_invalid (3).
+static void
+report(const char *what, struct bregs *regs, u32 at, int lineno)
+{
+    if (CONFIG_DEBUG_LEVEL >= (regs ? DEBUG_unimplemented : 1))
+        dprintf(1, "%s at %x line %d\n", what, at, lineno);
+    if (regs && CONFIG_DEBUG_LEVEL >= DEBUG_invalid)
+        dump_regs(regs);
 }
 
 // Report on an invalid parameter.
 void
-__warn_invalid(struct bregs *regs, int lineno, const char *fname)
+__warn_invalid(struct bregs *regs, int lineno)
 {
-    if (CONFIG_DEBUG_LEVEL >= DEBUG_invalid) {
-        dprintf(1, "invalid %s:%d:\n", fname, lineno);
-        dump_regs(regs);
-    }
+    report("invalid", regs, CALLER, lineno);
 }
 
 // Report on an unimplemented feature.
 void
-__warn_unimplemented(struct bregs *regs, int lineno, const char *fname)
+__warn_unimplemented(struct bregs *regs, int lineno)
 {
-    if (CONFIG_DEBUG_LEVEL >= DEBUG_unimplemented) {
-        dprintf(1, "unimplemented %s:%d:\n", fname, lineno);
-        dump_regs(regs);
-    }
+    report("unimplemented", regs, CALLER, lineno);
 }
 
 // Report a detected internal inconsistency.
 void
-__warn_internalerror(int lineno, const char *fname)
+__warn_internalerror(int lineno)
 {
-    dprintf(1, "WARNING - internal error detected at %s:%d!\n"
-            , fname, lineno);
+    report("WARNING - internal error", NULL, CALLER, lineno);
 }
 
 // Report on an allocation failure.
 void
-__warn_noalloc(int lineno, const char *fname)
+__warn_noalloc(int lineno)
 {
-    dprintf(1, "WARNING - Unable to allocate resource at %s:%d!\n"
-            , fname, lineno);
+    report("WARNING - Unable to allocate resource", NULL, CALLER, lineno);
 }
 
 // Report on a timeout exceeded.
 void
-__warn_timeout(int lineno, const char *fname)
+__warn_timeout(int lineno)
 {
-    dprintf(1, "WARNING - Timeout at %s:%d!\n", fname, lineno);
+    report("WARNING - Timeout", NULL, CALLER, lineno);
 }
 
 // Report a handler reporting an invalid parameter to the caller.
 void
-__set_invalid(struct bregs *regs, int lineno, const char *fname)
+__set_invalid(struct bregs *regs, int lineno)
 {
-    __warn_invalid(regs, lineno, fname);
+    report("invalid", regs, CALLER, lineno);
     set_invalid_silent(regs);
 }
 
 // Report a call of an unimplemented function.
 void
-__set_unimplemented(struct bregs *regs, int lineno, const char *fname)
+__set_unimplemented(struct bregs *regs, int lineno)
 {
-    __warn_unimplemented(regs, lineno, fname);
+    report("unimplemented", regs, CALLER, lineno);
     set_invalid_silent(regs);
 }
 
-// Report a handler reporting an invalid parameter code to the
-// caller.  Note, the lineno and return code are encoded in the same
-// parameter as gcc does a better job of scheduling function calls
-// when there are 3 or less parameters.
+// Report a handler reporting an invalid parameter code to the caller (the line in the code's upper bits: gcc
+// schedules calls of 3 parameters or less better).
 void
-__set_code_invalid(struct bregs *regs, u32 linecode, const char *fname)
+__set_code_invalid(struct bregs *regs, u32 linecode)
 {
-    u8 code = linecode;
-    u32 lineno = linecode >> 8;
-    __warn_invalid(regs, lineno, fname);
-    set_code_invalid_silent(regs, code);
+    report("invalid", regs, CALLER, linecode >> 8);
+    set_code_invalid_silent(regs, linecode);
 }
 
 // Report a call of an unimplemented function.
 void
-__set_code_unimplemented(struct bregs *regs, u32 linecode, const char *fname)
+__set_code_unimplemented(struct bregs *regs, u32 linecode)
 {
-    u8 code = linecode;
-    u32 lineno = linecode >> 8;
-    __warn_unimplemented(regs, lineno, fname);
-    set_code_invalid_silent(regs, code);
+    report("unimplemented", regs, CALLER, linecode >> 8);
+    set_code_invalid_silent(regs, linecode);
 }

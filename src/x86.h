@@ -12,6 +12,8 @@
 #define CR0_PG (1<<31) // Paging
 #define CR0_CD (1<<30) // Cache disable
 #define CR0_NW (1<<29) // Not Write-through
+#define CR0_NE (1<<5)  // Numeric error: FPU errors as exception 16, not FERR#/IRQ 13
+#define CR0_EM (1<<2)  // FPU instructions emulated (trap)
 #define CR0_PE (1<<0)  // Protection enable
 
 // PORT_A20 bitdefs

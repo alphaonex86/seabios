@@ -39,7 +39,7 @@ call16_int10(struct bregs *br)
 void
 enable_vga_console(void)
 {
-    dprintf(1, "Turning on vga text mode console\n");
+    dprintf(3, "Turning on vga text mode console\n");
     struct bregs br;
 
     /* Enable VGA text mode */

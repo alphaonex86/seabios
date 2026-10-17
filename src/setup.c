@@ -11,7 +11,9 @@
 #include "hw/ata.h" // ata_process_op
 #include "hw/pci.h" // pci_config_readb
 #include "hw/usb.h" // UsbListed
+#include "hw/pci_ids.h" // PCI_BASE_CLASS_DISPLAY
 #include "hw/pci_regs.h" // PCI_INTERRUPT_LINE
+#include "hw/pic.h" // PORT_PIC1_CMD
 #include "hw/pcidevice.h" // foreachpci
 #include "hw/ps2port.h" // ps2_kbd_command
 #include "hw/usb-hid.h" // usb_kbd_active
@@ -19,6 +21,7 @@
 #include "newbios_cmos.h" // NB_*
 #include "output.h" // snprintf
 #include "stacks.h" // call16_int
+#include "std/optionrom.h" // struct rom_header
 #include "string.h" // memset
 #include "util.h" // setup_menu
 #include "x86.h" // cpuid
@@ -308,6 +311,10 @@ setup_ide_timing(int idx, u8 mode)
     pci_config_writeb(IDE_BDF, 0x46 + chan, c | tc[mode] << nib);
 }
 
+// The onboard IDE positions by name, padded: in full and short.
+static const char * const IdeUnit[] = { "Primary Master  ", "Primary Slave   ", "Secondary Master", "Secondary Slave " };
+static const char * const IdeUnitShort[] = { "Pri. Master", "Pri. Slave ", "Sec. Master", "Sec. Slave " };
+
 // What the ATA driver found, for the setup screens.
 static struct {
     char model[41];
@@ -425,10 +432,22 @@ setup_post_warnings(void)
     }
 }
 
+// The debug ROM has no coreboot log: what coreboot set up in the host bridge (DRAM, L2, shadow), on COM1.
+static void
+debug_chipset(void)
+{
+    dprintf(1, "UM8881F 50h-6Fh:");
+    for (int r = 0x50; r < 0x70; r++)
+        dprintf(1, " %02x", pci_config_readb(HB_BDF, r));
+    dprintf(1, ", CMOS 3Eh-3Fh: %02x %02x\n", rtc_read(NB_CMOS_L2), rtc_read(NB_CMOS_LASTPOST));
+}
+
 // Validate the CMOS settings (load defaults if needed), apply the early ones; returns the boot order.
 u16
 setup_init(void)
 {
+    if (CONFIG_DEBUG_LEVEL)
+        debug_chipset();
     if (cmos_valid()) {
         int i;
         for (i = 0; i < NB_COUNT; i++)
@@ -535,6 +554,17 @@ scr_puts(int row, int col, u8 attr, const char *s)
 }
 
 static void
+scr_printf(int row, int col, u8 attr, const char *fmt, ...)
+{
+    char line[81];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    scr_puts(row, col, attr, line);
+}
+
+static void
 scr_fill(int row, int col, int len, u8 attr, char c)
 {
     for (; len > 0 && col < 80; len--, col++)
@@ -601,12 +631,10 @@ scr_confirm(const char *msg)
 }
 
 static void
-hex_byte(u8 b, char *out)
+wait_esc(void)
 {
-    static const char digits[] = "0123456789ABCDEF";
-    out[0] = digits[b >> 4];
-    out[1] = digits[b & 15];
-    out[2] = 0;
+    while (get_keystroke(1000) != 0x01)
+        ;
 }
 
 
@@ -1031,14 +1059,10 @@ draw_std(void)
         scr_puts(8 + i, 61 - strlen(line), AttrText, line);
     }
     u32 extkb = ext_mem_kb();
-    snprintf(line, sizeof(line), "    Base Memory: %6dK", GET_BDA(mem_size_kb));
-    scr_puts(13, 48, AttrText, line);
-    snprintf(line, sizeof(line), "Extended Memory: %6dK", extkb);
-    scr_puts(14, 48, AttrText, line);
-    snprintf(line, sizeof(line), "   Other Memory: %6dK", 1024 - GET_BDA(mem_size_kb));
-    scr_puts(15, 48, AttrText, line);
-    snprintf(line, sizeof(line), "   Total Memory: %6dK", extkb + 1024);
-    scr_puts(17, 48, AttrText, line);
+    scr_printf(13, 48, AttrText, "    Base Memory: %6dK", GET_BDA(mem_size_kb));
+    scr_printf(14, 48, AttrText, "Extended Memory: %6dK", extkb);
+    scr_printf(15, 48, AttrText, "   Other Memory: %6dK", 1024 - GET_BDA(mem_size_kb));
+    scr_printf(17, 48, AttrText, "   Total Memory: %6dK", extkb + 1024);
 }
 
 // LOAD BIOS DEFAULTS: the original BIOS's fail-safe values where they differ from the Setup ones.
@@ -1140,11 +1164,7 @@ page_run(const struct page *pg)
  * Hardware information
  ****************************************************************/
 
-static void
-info_line(int row, const char *s)
-{
-    scr_puts(row, 3, AttrText, s);
-}
+#define info_printf(row, ...) scr_printf(row, 3, AttrText, __VA_ARGS__)
 
 static const char *
 cpu_name(const char *vendor, u32 fms, int *mhz_valid)
@@ -1285,6 +1305,25 @@ static const char * const L2StepNames[] = {
 };
 static u8 L2HungStep;   // the step the previous POST's L2 init stopped at
 
+// SIMM sockets as coreboot set the DRAM regions (52h, 53h): region L at 0 and U above it each take the pair
+// SIMM1-2 or SIMM3-4 (52h bit 3: 3-4 form L), 1 << n MB, on one SIMM of the pair (53h bit 4/5: the second) or both
+static void
+info_simms(int row)
+{
+    u8 hb52 = pci_config_readb(HB_BDF, 0x52), hb53 = pci_config_readb(HB_BDF, 0x53);
+    char simm[4][24] = { "not used", "not used", "not used", "not used" };
+    for (int upper = 0; upper < 2; upper++) {
+        int n = hb52 >> (upper ? 4 : 0) & 7, cfg = hb53 >> (upper ? 2 : 0), both = cfg & 1;
+        int first = (upper ^ (hb52 >> 3 & 1)) * 2, second = hb53 >> (upper ? 5 : 4) & 1;
+        for (int s = 0; s < 2 && n; s++)
+            if (both || s == second)
+                snprintf(simm[first + s], sizeof(simm[0]), "%d MB %s-sided", (1 << n) >> both,
+                         cfg & 2 ? "double" : "single");
+    }
+    info_printf(row, "SIMM1 / SIMM2  : %s / %s", simm[0], simm[1]);
+    info_printf(row + 1, "SIMM3 / SIMM4  : %s / %s", simm[2], simm[3]);
+}
+
 static void
 info_cpu(void)
 {
@@ -1295,23 +1334,19 @@ info_cpu(void)
     int have_cpuid = cpu_ident(vendor, &fms, &edx);
     if (have_cpuid) {
         name = cpu_name(vendor, fms, &mhz_valid);
-        snprintf(line, sizeof(line), "CPU            : %s (%s)", name, vendor);
-        info_line(row++, line);
-        snprintf(line, sizeof(line), "CPUID          : family %d, model %d, stepping %d (%x)",
-                 (fms >> 8) & 0xf, (fms >> 4) & 0xf, fms & 0xf, fms);
-        info_line(row++, line);
-        snprintf(line, sizeof(line), "Features       :%s%s%s%s%s%s", edx & 1 ? " FPU" : "",
-                 edx & 2 ? " VME" : "", edx & 8 ? " PSE" : "", edx & 0x10 ? " TSC" : "",
-                 edx & 0x20 ? " MSR" : "", edx & 0x100 ? " CX8" : "");
-        info_line(row++, line);
+        info_printf(row++, "CPU            : %s (%s)", name, vendor);
+        info_printf(row++, "CPUID          : family %d, model %d, stepping %d (%x)", (fms >> 8) & 0xf, (fms >> 4) & 0xf,
+                    fms & 0xf, fms);
+        info_printf(row++, "Features       :%s%s%s%s%s%s", edx & 1 ? " FPU" : "", edx & 2 ? " VME" : "",
+                    edx & 8 ? " PSE" : "", edx & 0x10 ? " TSC" : "", edx & 0x20 ? " MSR" : "",
+                    edx & 0x100 ? " CX8" : "");
     } else {
         int dir0 = cpu_cyrix_dir0();
         if (dir0 >= 0x28 && dir0 <= 0x2f)
             name = "Cyrix 5x86 (CPUID disabled)";
         else if (dir0 >= 0x1a && dir0 <= 0x1f)
             name = "Cyrix 486DX/DX2/DX4 (no CPUID)";
-        snprintf(line, sizeof(line), "CPU            : %s", name);
-        info_line(row++, line);
+        info_printf(row++, "CPU            : %s", name);
         row += 2;
     }
     // clocks: the core measured, the bus from it and the CPU's multiplier, the rest from the chipset dividers
@@ -1324,11 +1359,9 @@ info_cpu(void)
     u8 hb50 = pci_config_readb(HB_BDF, 0x50), hb51 = pci_config_readb(HB_BDF, 0x51);
     u8 a4 = pci_config_readb(IBC_BDF, 0xa4) & 3, i56 = pci_config_readb(IBC_BDF, 0x56) & 3;
     u32 pci10 = a4 == 1 ? bus10 : a4 == 2 ? bus10 * 2 / 3 : bus10 / 2;   // host:PCI 1:1, 2/3, 1/2
-    snprintf(line, sizeof(line), "Core clock     : %d MHz (measured)", mhz);
-    info_line(row++, line);
-    snprintf(line, sizeof(line), "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)",
-             bus10 / 10, bus10 % 10, mult);
-    info_line(row++, line);
+    info_printf(row++, "Core clock     : %d MHz (measured)", mhz);
+    info_printf(row++, "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)", bus10 / 10,
+                bus10 % 10, mult);
     if (i56 < 2)
         snprintf(line, sizeof(line), "PCI / ISA clock: %d.%d MHz (host:PCI %s) / %d.%d MHz (PCICLK/%d)", pci10 / 10,
                  pci10 % 10, a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2", pci10 / (i56 ? 4 : 3) / 10,
@@ -1336,13 +1369,12 @@ info_cpu(void)
     else
         snprintf(line, sizeof(line), "PCI clock      : %d.%d MHz (host:PCI %s)", pci10 / 10, pci10 % 10,
                  a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2");
-    info_line(row++, line);
+    info_printf(row++, "%s", line);
     row++;
     u32 fam = (fms >> 8) & 0xf, model = (fms >> 4) & 0xf;
     int l1kb = fam == 4 && (model == 8 || model == 9 || model >= 14) ? 16 : 8;   // DX4, Am5x86: 16 KB
-    snprintf(line, sizeof(line), "L1 cache       : %d KB, %s, at %d MHz (core clock)", l1kb,
-             (cr0_read() & CR0_CD) ? "disabled" : "enabled", mhz);
-    info_line(row++, line);
+    info_printf(row++, "L1 cache       : %d KB, %s, at %d MHz (core clock)", l1kb,
+                (cr0_read() & CR0_CD) ? "disabled" : "enabled", mhz);
     static const char * const l2_timing[] = { "3-2-2-2", "3-1-1-1", "2-2-2-2", "2-1-1-1" };
     u8 l2 = hb50, found = rtc_read(NB_CMOS_L2);
     if (L2Status == L2_OK || L2Status == L2_NOT_RUN)
@@ -1357,18 +1389,18 @@ info_cpu(void)
     else    // found but left off: why
         snprintf(line, sizeof(line), "L2 cache       : %d KB, %d bank(s), OFF: %s",
                  (found & 7) ? 32 << (found & 7) : 0, (found & 8) ? 2 : 1, L2Names[L2Status]);
-    info_line(row++, line);
+    info_printf(row++, "%s", line);
     row++;
     u32 extkb = ext_mem_kb();
-    snprintf(line, sizeof(line), "DRAM           : %d KB (base %d KB, extended %d KB)",
-             extkb + 1024, GET_BDA(mem_size_kb), extkb);
-    info_line(row++, line);
-    snprintf(line, sizeof(line), "DRAM timing    : at %d MHz (bus), %s, read %d WS, write %d WS", bus,
-             (pci_config_readb(HB_BDF, 0x61) & 0xc0) ? "EDO" : "fast page mode", 3 - (hb51 >> 6), 3 - (hb51 >> 4 & 3));
-    info_line(row++, line);
-    snprintf(line, sizeof(line), "Chipset        : UMC UM8881F rev %x, UM8886BF rev %x, UM8663BF",
-             pci_config_readb(HB_BDF, PCI_REVISION_ID), pci_config_readb(IBC_BDF, PCI_REVISION_ID));
-    info_line(row++, line);
+    info_printf(row++, "DRAM           : %d KB (base %d KB, extended %d KB)", extkb + 1024, GET_BDA(mem_size_kb),
+                extkb);
+    info_printf(row++, "DRAM timing    : at %d MHz (bus), %s, read %d WS, write %d WS", bus,
+                (pci_config_readb(HB_BDF, 0x61) & 0xc0) ? "EDO" : "fast page mode", 3 - (hb51 >> 6),
+                3 - (hb51 >> 4 & 3));
+    info_simms(row);
+    row += 2;
+    info_printf(row++, "Chipset        : UMC UM8881F rev %x, UM8886BF rev %x, UM8663BF",
+                pci_config_readb(HB_BDF, PCI_REVISION_ID), pci_config_readb(IBC_BDF, PCI_REVISION_ID));
 }
 
 static const char *
@@ -1419,9 +1451,8 @@ info_pci(void)
         u8 pin = pci_config_readb(pci->bdf, PCI_INTERRUPT_PIN);
         u8 irq = pci_config_readb(pci->bdf, PCI_INTERRUPT_LINE);
         u8 devfn = pci_bdf_to_devfn(pci->bdf);
-        snprintf(line, sizeof(line), "%02x:%02x.%x   %04x:%04x", pci_bdf_to_bus(pci->bdf)
-                 , devfn >> 3, devfn & 7, pci->vendor, pci->device);
-        info_line(row, line);
+        info_printf(row, "%02x:%02x.%x   %04x:%04x", pci_bdf_to_bus(pci->bdf), devfn >> 3, devfn & 7, pci->vendor,
+                    pci->device);
         scr_puts(row, 27, AttrText, pci_vendor(pci->vendor));
         scr_puts(row, 37, AttrText, pci_class_name(pci->class));
         if (pin) {
@@ -1504,7 +1535,7 @@ info_usb_level(int parent, int depth, int row)
             snprintf(line + ind, sizeof(line) - ind, "port %d: %04x:%04x %s, %s speed%s", l->port,
                      l->vid, l->pid, what, speed[l->speed & 3], l->ok ? "" : ", no driver");
         }
-        info_line(row++, line);
+        info_printf(row++, "%s", line);
         row = info_usb_level(i, depth + 1, row);
     }
     return row;
@@ -1515,22 +1546,18 @@ info_usb(void)
 {
     scr_puts(4, 3, AttrTitle, "Controllers, ports and devices");
     if (info_usb_level(-1, 0, 5) == 5)
-        info_line(5, "none");
+        info_printf(5, "none");
 }
 
 static void
 info_isa(void)
 {
     const char *owner[16];
-    char line[80];
     int i, row = 4;
     irq_owners(owner);
-    snprintf(line, sizeof(line), "Serial ports   : %x %x %x %x", GET_BDA(port_com[0]),
-             GET_BDA(port_com[1]), GET_BDA(port_com[2]), GET_BDA(port_com[3]));
-    info_line(row++, line);
-    snprintf(line, sizeof(line), "Parallel ports : %x %x %x", GET_BDA(port_lpt[0]),
-             GET_BDA(port_lpt[1]), GET_BDA(port_lpt[2]));
-    info_line(row++, line);
+    info_printf(row++, "Serial ports   : %x %x %x %x", GET_BDA(port_com[0]), GET_BDA(port_com[1]), GET_BDA(port_com[2]),
+                GET_BDA(port_com[3]));
+    info_printf(row++, "Parallel ports : %x %x %x", GET_BDA(port_lpt[0]), GET_BDA(port_lpt[1]), GET_BDA(port_lpt[2]));
     u32 a;
     char roms[64] = "", *p = roms;
     for (a = 0xc8000; a < 0xe0000; a += 2048) {
@@ -1540,33 +1567,27 @@ info_isa(void)
             a += (rom[2] * 512 - 1) & ~2047;
         }
     }
-    snprintf(line, sizeof(line), "Option ROMs    :%s", roms[0] ? roms : " none at C8000-DFFFF");
-    info_line(row++, line);
+    info_printf(row++, "Option ROMs    :%s", roms[0] ? roms : " none at C8000-DFFFF");
     for (i = 0; i < ARRAY_SIZE(PnpCard) && PnpCard[i][0]; i++)
-        info_line(row++, PnpCard[i]);
+        info_printf(row++, "%s", PnpCard[i]);
     row++;
     for (i = 0; i < 16; i++) {
-        snprintf(line, sizeof(line), "IRQ %d : %s", i, owner[i][0] ? owner[i] : "free");
-        scr_puts(row + (i & 7), 3 + (i >> 3) * 38, AttrText, line);
+        scr_printf(row + (i & 7), 3 + (i >> 3) * 38, AttrText, "IRQ %d : %s", i, owner[i][0] ? owner[i] : "free");
     }
 }
 
 static void
 info_ide(void)
 {
-    static const char * const unit[] = { "Primary Master  ", "Primary Slave   ",
-                                         "Secondary Master", "Secondary Slave " };
     static const char * const trans[] = { "NORMAL", "LBA", "LARGE", "RECHS", "TYPE" };
     char line[80];
     int i, row = 4;
     for (i = 0; i < 4; i++, row += 3) {
         if (!IdeInfo[i].present) {
-            snprintf(line, sizeof(line), "%s : None", unit[i]);
-            info_line(row, line);
+            info_printf(row, "%s : None", IdeUnit[i]);
             continue;
         }
-        snprintf(line, sizeof(line), "%s : %s", unit[i], IdeInfo[i].model);
-        info_line(row, line);
+        info_printf(row, "%s : %s", IdeUnit[i], IdeInfo[i].model);
         if (IdeInfo[i].atapi)
             snprintf(line, sizeof(line), "    ATAPI CD-ROM, PIO mode %d (drive max %d)",
                      IdeInfo[i].pio, IdeInfo[i].pio_max);
@@ -1576,7 +1597,7 @@ info_ide(void)
                      IdeInfo[i].sectors / 2048, IdeInfo[i].cyl, IdeInfo[i].heads, IdeInfo[i].spt,
                      trans[get_translation(IdeInfo[i].drive) % 5], IdeInfo[i].pio,
                      IdeInfo[i].pio_max, IdeInfo[i].multiple ?: 1);
-        info_line(row + 1, line);
+        info_printf(row + 1, "%s", line);
     }
 }
 
@@ -1587,27 +1608,47 @@ info_regs(const char *name, u16 bdf, int first, int rows, int row)
     int r, i;
     for (r = 0; r < rows; r++) {
         p = line + snprintf(line, sizeof(line), "%s %x:", name, first + 16 * r);
-        for (i = 0; i < 16; i++, p += 3) {
-            *p = ' ';
-            hex_byte(pci_config_readb(bdf, first + 16 * r + i), p + 1);
-        }
-        info_line(row + r, line);
+        for (i = 0; i < 16; i++)
+            p += snprintf(p, line + sizeof(line) - p, " %02X", pci_config_readb(bdf, first + 16 * r + i));
+        info_printf(row + r, "%s", line);
     }
 }
 
+// The CHIPSET FEATURES options as the chip has them (with Auto Configuration: coreboot's values; the timings are on
+// the CPU page), which C8000-DFFFF blocks are shadow RAM, then the registers.
 static void
 info_chipset(void)
 {
-    char line[80], c0[3], c1[3];
-    info_regs("UM8881F  00:10.0", HB_BDF, 0x40, 3, 4);
-    info_regs("UM8886BF 00:12.0", IBC_BDF, 0x40, 7, 8);
-    info_regs("IDE      00:12.1", IDE_BDF, 0x40, 1, 16);
+    static const struct nb_field fields[] = { NB_OPTION_FIELDS };
+    for (int i = 0; i < ARRAY_SIZE(fields); i++) {
+        const struct nb_field *f = &fields[i];
+        const struct item *it = ChipItems;
+        while (it->var != f->setting)
+            it++;
+        u8 bits = pci_config_readb(f->ibc ? IBC_BDF : HB_BDF, f->reg) & f->mask;
+        int v = 0;
+        while (v < f->count && f->value[v] != bits)
+            v++;
+        int row = 3 + i / 2, col = i % 2 ? 41 : 3;
+        scr_puts(row, col, AttrText, it->label);
+        if (v < f->count)
+            scr_puts(row, col + 27, AttrText, it->names[v]);
+        else
+            scr_printf(row, col + 27, AttrText, "bits %02x", bits);
+    }
+    char map[32], *p = map;
+    u8 hb54 = pci_config_readb(HB_BDF, 0x54);
+    for (int b = 0; b < 6; b++)
+        p += snprintf(p, map + sizeof(map) - p, " %s", hb54 >> (2 + b) & 1 ? "RAM" : "ISA");
+    info_printf(8, "C8000-DFFFF    :%s (16K each, RAM: shadow, %s)", map,
+                pci_config_readb(HB_BDF, 0x55) & 0x40 ? "read-only" : "writable");
+    info_regs("UM8881F  00:10.0", HB_BDF, 0x50, 2, 10);
+    info_regs("UM8886BF 00:12.0", IBC_BDF, 0x40, 7, 12);
+    info_regs("IDE      00:12.1", IDE_BDF, 0x40, 1, 19);
     outb(0xaa, SIO_INDEX);
-    hex_byte(sio_read(0xc0), c0);
-    hex_byte(sio_read(0xc1), c1);
+    u8 c0 = sio_read(0xc0), c1 = sio_read(0xc1);
     outb(0x55, SIO_INDEX);
-    snprintf(line, sizeof(line), "UM8663BF super I/O   C0: %s  C1: %s", c0, c1);
-    info_line(18, line);
+    info_printf(20, "UM8663BF super I/O   C0: %02X  C1: %02X", c0, c1);
 }
 
 static void info_bench_memory(void);
@@ -1899,58 +1940,6 @@ setup_pnp(void)
                | (Setting[NB_LPT] ? Setting[NB_LPT_MODE] : 0) << 3);
 }
 
-static const struct {
-    const char *title;
-    void (*draw)(void);
-    int own;                                    // graphics benchmark: draws itself, until ESC
-} InfoPages[] = {
-    { "CPU, CACHE AND MEMORY", info_cpu },
-    { "PCI DEVICES", info_pci },
-    { "USB DEVICES", info_usb },
-    { "ISA RESOURCES AND IRQ MAP", info_isa },
-    { "IDE DRIVES", info_ide },
-    { "CHIPSET REGISTERS", info_chipset },
-    { "MEMORY SPEED", info_bench_memory, 1 },
-    { "CPU BENCHMARK", info_bench_cpu, 1 },
-    { "HARD DISK BENCHMARK", info_bench_disk, 1 },
-    { "HARD DISK SPEED", info_bench_disk_bars, 1 },
-};
-
-// One page until ESC.
-static void
-info_page(int p)
-{
-    if (InfoPages[p].own) {
-        InfoPages[p].draw();
-        return;
-    }
-    scr_header(InfoPages[p].title);
-    InfoPages[p].draw();
-    scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
-    while (get_keystroke(1000) != 0x01)
-        ;
-}
-
-// HARDWARE INFORMATION: a menu of the pages.
-static void
-info_menu(void)
-{
-    int sel = 0, n = ARRAY_SIZE(InfoPages);
-    for (;;) {
-        scr_header("HARDWARE INFORMATION");
-        for (int i = 0; i < n; i++)
-            scr_puts(4 + i, 26, i == sel ? AttrSelect : AttrText, InfoPages[i].title);
-        scr_puts(ROW_HELP, 2, AttrText, "ESC : Back      \x18\x19 : Select Page      Enter : Show");
-        switch (get_keystroke(1000)) {
-        case 0x01: return;
-        case 0x48: sel = (sel + n - 1) % n; break;
-        case 0x50: sel = (sel + 1) % n; break;
-        case 0x1c: info_page(sel); break;
-        }
-    }
-}
-
-
 /****************************************************************
  * Password
  ****************************************************************/
@@ -2041,7 +2030,79 @@ setup_boot_password(void)
  * Main menu
  ****************************************************************/
 
-enum { M_PAGE, M_INFO, M_PASSWORD, M_IDE, M_MEMTEST, M_CACHETEST, M_SRAMTEST, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
+static void l2_test_run(void);
+static void l2_sram_test(void);
+static void board_test(void);
+static void surface_scan(void);
+
+struct tool {
+    const char *title, *help;
+    void (*run)(void);
+};
+
+static const struct tool InfoPages[] = {
+    { "CPU, CACHE AND MEMORY", NULL, info_cpu },
+    { "PCI DEVICES", NULL, info_pci },
+    { "USB DEVICES", NULL, info_usb },
+    { "ISA RESOURCES AND IRQ MAP", NULL, info_isa },
+    { "IDE DRIVES", "Drives found at this boot", info_ide },
+    { "CHIPSET REGISTERS", NULL, info_chipset },
+};
+
+static const struct tool Benchmarks[] = {
+    { "MEMORY SPEED", "Memory speed (MB/s) by block size", info_bench_memory },
+    { "CPU BENCHMARK", "Integer and floating point speed, with 486 references", info_bench_cpu },
+    { "HARD DISK BENCHMARK", "Any IDE or USB disk: seek times, buffered and linear read speed", info_bench_disk },
+    { "HARD DISK SPEED", "Linear read speed of each IDE or USB disk, with the PIO mode limits", info_bench_disk_bars },
+};
+
+static const struct tool Tests[] = {
+    { "BOARD TEST", "IRQ lines, timers, RTC, DMA, IDE cable, video memory, buses, CMOS RAM, keyboard", board_test },
+    { "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM", mt_run },
+    { "CACHE TEST", "L2 cache: each write policy, timing and tag width", l2_test_run },
+    { "L2 SRAM TEST", "L2 cache chips: which one fails", l2_sram_test },
+    { "HDD SURFACE SCAN", "IDE hard disk: every sector read and checked (ESC stops)", surface_scan },
+};
+
+static const struct {
+    const struct tool *tools;
+    u8 count, page;                             // page: drawn under its title until ESC, else draws itself
+} ToolMenus[] = {
+    { InfoPages, ARRAY_SIZE(InfoPages), 1 },
+    { Benchmarks, ARRAY_SIZE(Benchmarks), 0 },
+    { Tests, ARRAY_SIZE(Tests), 0 },
+};
+
+static void
+tool_menu(const char *title, int m)
+{
+    const struct tool *t = ToolMenus[m].tools;
+    int sel = 0, n = ToolMenus[m].count;
+    for (;;) {
+        scr_header(title);
+        for (int i = 0; i < n; i++)
+            scr_puts(4 + 2 * i, 26, i == sel ? AttrSelect : AttrText, t[i].title);
+        scr_puts(ROW_HELP, 2, AttrText, "ESC : Back      \x18\x19 : Select Item      Enter : Open");
+        if (t[sel].help)
+            scr_center(23, AttrTitle, t[sel].help);
+        switch (get_keystroke(1000)) {
+        case 0x01: return;
+        case 0x48: sel = (sel + n - 1) % n; break;
+        case 0x50: sel = (sel + 1) % n; break;
+        case 0x1c:
+            if (!ToolMenus[m].page) {
+                t[sel].run();
+                break;
+            }
+            scr_header(t[sel].title);
+            t[sel].run();
+            scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
+            wait_esc();
+        }
+    }
+}
+
+enum { M_PAGE, M_TOOLS, M_PASSWORD, M_BIOS_DEFAULTS, M_DEFAULTS, M_SAVE, M_QUIT };
 
 static const struct {
     u8 kind, arg;
@@ -2053,22 +2114,17 @@ static const struct {
     { M_PAGE, 3, "POWER MANAGEMENT SETUP", "APM BIOS, HDD Standby Timer" },
     { M_PAGE, 4, "PNP/PCI CONFIGURATION", "PCI IRQ Routing, IDE PIO Modes" },
     { M_PAGE, 5, "INTEGRATED PERIPHERALS", "Onboard IDE, FDC, Serial and Parallel Ports" },
-    { M_INFO, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, ISA/IRQ, IDE, Chipset, Memory Speed Chart" },
     { M_PASSWORD, 0, "SUPERVISOR PASSWORD", "Change, Set, or Disable Password" },
-    { M_IDE, 0, "IDE HDD AUTO DETECTION", "Drives found at this boot" },
-    { M_MEMTEST, 0, "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM" },
-    { M_CACHETEST, 0, "CACHE TEST", "L2 cache: each write policy, timing and tag width" },
-    { M_SRAMTEST, 0, "L2 SRAM TEST", "L2 cache chips: which one fails" },
+    { M_TOOLS, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, USB, ISA/IRQ, IDE Drives, Chipset Registers" },
+    { M_TOOLS, 1, "BENCHMARKS", "Memory Speed Chart, CPU, Hard Disk" },
+    { M_TOOLS, 2, "HARDWARE TESTS", "Board, Memory, L2 Cache and its SRAM, Hard Disk Surface" },
     { M_BIOS_DEFAULTS, 0, "LOAD BIOS DEFAULTS", "Load BIOS Defaults except Standard CMOS SETUP" },
     { M_DEFAULTS, 0, "LOAD SETUP DEFAULTS", "Load SETUP Defaults except Standard CMOS SETUP" },
     { M_SAVE, 0, "SAVE & EXIT SETUP", "Save Data to CMOS & Exit SETUP" },
     { M_QUIT, 0, "EXIT WITHOUT SAVING", "Abandon all Data & Exit SETUP" },
 };
 
-#define MENU_ROWS 8
-
-static void l2_test_run(void);
-static void l2_sram_test(void);
+#define MENU_ROWS 7
 
 static void
 save_and_reboot(void)
@@ -2087,7 +2143,7 @@ menu_draw(int sel)
     int i;
     scr_header("CMOS SETUP UTILITY");
     for (i = 0; i < ARRAY_SIZE(Menu); i++) {
-        int row = 4 + 2 * (i % MENU_ROWS), col = i < MENU_ROWS ? 6 : 44;
+        int row = 3 + 2 * (i % MENU_ROWS), col = i < MENU_ROWS ? 6 : 44;
         scr_puts(row, col, i == sel ? AttrSelect : AttrText, Menu[i].name);
     }
     draw_help(0);
@@ -2111,7 +2167,9 @@ setup_menu(void)
         switch (key) {
         case 0x48: sel = (sel + n - 1) % n; break;
         case 0x50: sel = (sel + 1) % n; break;
-        case 0x4b: case 0x4d: sel = (sel + MENU_ROWS) % n; break;
+        case 0x4b: case 0x4d:                                    // the other column
+            sel = sel >= MENU_ROWS ? sel - MENU_ROWS : sel + MENU_ROWS < n ? sel + MENU_ROWS : n - 1;
+            break;
         case 0x44: save_and_reboot(); break;
         case 0x42:                                               // F8: leave without saving, boot menu
             SetupBootMenu = 1;
@@ -2126,11 +2184,7 @@ setup_menu(void)
         case 0x1c:
             switch (Menu[sel].kind) {
             case M_PAGE: page_run(&Pages[Menu[sel].arg]); break;
-            case M_INFO: info_menu(); break;
-            case M_IDE: info_page(4); break;
-            case M_MEMTEST: mt_run(); break;
-            case M_CACHETEST: l2_test_run(); break;
-            case M_SRAMTEST: l2_sram_test(); break;
+            case M_TOOLS: tool_menu(Menu[sel].name, Menu[sel].arg); break;
             case M_PASSWORD: password_set(); break;
             case M_BIOS_DEFAULTS:
                 if (scr_confirm("Load BIOS Defaults (Y/N)? "))
@@ -2254,14 +2308,10 @@ setup_l2_post_line(void)
 void
 setup_ide_detect(int idx, int done)
 {
-    static const char * const unit[] = { "Primary Master  ", "Primary Slave   ",
-                                         "Secondary Master", "Secondary Slave " };
-    char line[80];
     if (idx < 0 || !Vram)
         return;
-    snprintf(line, sizeof(line), "Detecting HDD %s ... %s", unit[idx],
-             !done ? "" : IdeInfo[idx].present ? IdeInfo[idx].model : "None");
-    scr_puts(ROW_IDE + idx, 0, AttrText, line);
+    scr_printf(ROW_IDE + idx, 0, AttrText, "Detecting HDD %s ... %s", IdeUnit[idx],
+               !done ? "" : IdeInfo[idx].present ? IdeInfo[idx].model : "None");
 }
 
 // Keys during the memory test: ESC skips it, DEL requests setup at the end of POST.
@@ -2371,25 +2421,13 @@ read_block(u32 addr, u32 bytes)
                  : "=&r"(dummy), "+r"(addr), "+r"(n) : : "memory");
 }
 
-// MB/s reading 'block' bytes from 1 MiB over and over for about 20 ms (after one warm-up pass).
+static u16 mem_speed(int kind, u32 src, u32 dst, u32 block);
+
+// MB/s reading 'block' bytes from 1 MiB over and over.
 static u16
 read_speed(u32 block)
 {
-    u32 chunk = block < 0x10000 ? block : 0x10000, done = 0, ticks = 0, off;
-    u32 flags = save_flags();
-    irq_disable();
-    read_block(0x100000, block);
-    u32 t0 = timer_read();
-    do {
-        for (off = 0; off < block; off += chunk) {
-            u32 n = block - off < chunk ? block - off : chunk;
-            read_block(0x100000 + off, n);
-            done += n;
-            ticks = timer_read() - t0;          // read often: the timer wraps
-        }
-    } while (ticks < TimerKHz * 20);
-    restore_flags(flags);
-    return (done >> 10) * TimerKHz / ticks * 1024 / 1000;
+    return mem_speed(0, 0x100000, 0x100000, block);
 }
 
 // Measured once, the first time setup shows the speeds (about 1 s).
@@ -2522,7 +2560,7 @@ l2_log(const char *text)
             scr_fill(r, 0, 80, AttrText, ' ');
         L2Log = L2_LOG_TOP;
     }
-    info_line(L2Log++, text);
+    info_printf(L2Log++, "%s", text);
     msleep(1000);
 }
 
@@ -2763,9 +2801,8 @@ l2_test_run(void)
     if (!size) {
         scr_header("CACHE TEST");
         scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
-        info_line(3, "No L2 cache found at POST");
-        while (get_keystroke(1000) != 0x01)
-            ;
+        info_printf(3, "No L2 cache found at POST");
+        wait_esc();
         return;
     }
     for (int v = 0; v < 16; v++) {
@@ -2790,8 +2827,8 @@ l2_test_run(void)
         else
             snprintf(line, sizeof(line), "L2 found at POST: %dK, %d bank(s); POST setting 50h=%x", size >> 10,
                      found & 8 ? 2 : 1, L2PostHb50);
-        info_line(3, line);
-        info_line(4, "Policy  Timing  Tag  Result                          L2 MB/s  DRAM MB/s");
+        info_printf(3, "%s", line);
+        info_printf(4, "Policy  Timing  Tag  Result                          L2 MB/s  DRAM MB/s");
         for (int v = 0; v < 16; v++)
             scr_puts(5 + v, 3, v == sel ? AttrSelect : AttrText, rows[v]);
         scr_puts(ROW_HELP, 2, AttrText, "ESC : Back   \x18\x19 : Select   Enter : Run step by step   A : Run all");
@@ -3080,10 +3117,10 @@ l2_sram_test(void)
     struct l2s_result r;
     memset(&r, 0, sizeof(r));
     scr_header("L2 SRAM TEST");
-    info_line(3, "Testing the L2 chips...");
+    info_printf(3, "Testing the L2 chips...");
     void *buf = malloc_tmphigh(4 << 20);             // an L2 size aligned to itself, and two to save DRAM in
     if (!buf) {
-        info_line(3, "Not enough free memory for the test (4 MB)");
+        info_printf(3, "Not enough free memory for the test (4 MB)");
         goto wait;
     }
     if (L2PostHb50) {
@@ -3113,22 +3150,19 @@ l2_sram_test(void)
     scr_header("L2 SRAM TEST");
     u32 size = l2_size(r.bits), banks = r.bits & 0x08 ? 2 : 1;
     if (!size) {
-        info_line(3, "No L2 data SRAM answers (none installed, or the chipset is not a UM8881)");
+        info_printf(3, "No L2 data SRAM answers (none installed, or the chipset is not a UM8881)");
         goto wait;
     }
-    snprintf(line, sizeof(line), "Found: %dK = %d bank%s x 4 chips of %dK x 8 = %d data chips + 1 tag RAM",
-             size >> 10, banks, banks == 2 ? "s" : "", size / banks / 4 >> 10, banks * 4);
-    info_line(3, line);
+    info_printf(3, "Found: %dK = %d bank%s x 4 chips of %dK x 8 = %d data chips + 1 tag RAM", size >> 10, banks,
+                banks == 2 ? "s" : "", size / banks / 4 >> 10, banks * 4);
     if (l2_size(found) != size || (found & 0x08) != (r.bits & 0x08)) {
-        snprintf(line, sizeof(line), "(the POST's detection found %dK, %d bank%s)", l2_size(found) >> 10,
-                 found & 0x08 ? 2 : 1, found & 0x08 ? "s" : "");
-        info_line(4, line);
+        info_printf(4, "(the POST's detection found %dK, %d bank%s)", l2_size(found) >> 10, found & 0x08 ? 2 : 1,
+                    found & 0x08 ? "s" : "");
     }
     if (popcount4(r.lanes) < 4) {
-        snprintf(line, sizeof(line), "Only %d of 4 byte lanes answered the size detection", popcount4(r.lanes));
-        info_line(5, line);
+        info_printf(5, "Only %d of 4 byte lanes answered the size detection", popcount4(r.lanes));
     }
-    info_line(6, "Data chips  D0-D7     D8-D15    D16-D23   D24-D31");
+    info_printf(6, "Data chips  D0-D7     D8-D15    D16-D23   D24-D31");
     int failed = 0;
     for (int b = 0; b < banks; b++) {
         snprintf(line, sizeof(line), "  Bank %d    ", b);
@@ -3154,28 +3188,24 @@ l2_sram_test(void)
             u8 m = r.bad[b] >> (8 * l);
             if (!m)
                 continue;
-            snprintf(line, sizeof(line), "FAIL: data chip bank %d, %s: %s", b, lane_name[l],
-                     m == 0xff ? "dead or missing" : "bits stuck or shorted (hex mask above)");
-            scr_puts(row++, 3, AttrSelect, line);
+            scr_printf(row++, 3, AttrSelect, "FAIL: data chip bank %d, %s: %s", b, lane_name[l],
+                       m == 0xff ? "dead or missing" : "bits stuck or shorted (hex mask above)");
         }
     if (!failed) {
-        snprintf(line, sizeof(line), "All %d data chips work.", banks * 4);
-        info_line(row++, line);
+        info_printf(row++, "All %d data chips work.", banks * 4);
     }
     if (!r.tag_lines)
-        info_line(row++, "Tag RAM: not tested (no working data lane, or too little RAM)");
+        info_printf(row++, "Tag RAM: not tested (no working data lane, or too little RAM)");
     else if (!r.tag_fails) {
-        snprintf(line, sizeof(line), "Tag RAM: OK (%d tag bits, %d lines x 2); dirty bit: %s", r.tag_bits,
-                 r.tag_lines / 2, !r.dirty_tested ? "not tested" : r.dirty_fails ? "FAIL" : "OK");
-        scr_puts(row++, 3, r.dirty_fails ? AttrSelect : AttrText, line);
+        scr_printf(row++, 3, r.dirty_fails ? AttrSelect : AttrText,
+                   "Tag RAM: OK (%d tag bits, %d lines x 2); dirty bit: %s", r.tag_bits, r.tag_lines / 2,
+                   !r.dirty_tested ? "not tested" : r.dirty_fails ? "FAIL" : "OK");
         if (r.dirty_fails) {
-            snprintf(line, sizeof(line), "FAIL: tag RAM bit 7 (dirty): %d written lines never reached DRAM",
-                     r.dirty_fails);
-            scr_puts(row++, 3, AttrSelect, line);
+            scr_printf(row++, 3, AttrSelect, "FAIL: tag RAM bit 7 (dirty): %d written lines never reached DRAM",
+                       r.dirty_fails);
         }
     } else {
-        snprintf(line, sizeof(line), "FAIL: tag RAM (the 9th chip): %d of %d lines miss", r.tag_fails, r.tag_lines);
-        scr_puts(row++, 3, AttrSelect, line);
+        scr_printf(row++, 3, AttrSelect, "FAIL: tag RAM (the 9th chip): %d of %d lines miss", r.tag_fails, r.tag_lines);
         u32 ntags = 1 << r.tag_bits, testable = 0, kept = 0, kept_and = ~0, kept_or = 0, one = 0;
         for (u32 t = 0; t < ntags; t++) {
             testable += r.tag_testable[t / 32] >> (t % 32) & 1;
@@ -3203,12 +3233,1118 @@ l2_sram_test(void)
     }
     row++;
     if (banks == 2)
-        info_line(row++, "Bank 0 holds the dwords with A2 = 0, bank 1 those with A2 = 1.");
-    info_line(row++, "To find a chip on the board: power off, remove one, test again: it shows DEAD.");
+        info_printf(row++, "Bank 0 holds the dwords with A2 = 0, bank 1 those with A2 = 1.");
+    info_printf(row++, "To find a chip on the board: power off, remove one, test again: it shows DEAD.");
 wait:
     scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
-    while (get_keystroke(1000) != 0x01)
+    wait_esc();
+}
+
+/****************************************************************
+ * BOARD TEST: each IRQ line raised by its device on the board, the PIT channels and the RTC crystal, the DMA
+ * controller's registers, the IDE cable, the PCI and ISA buses, the CMOS RAM, the keyboard controller.
+ * An IRQ line is read in the PIC's request register (IRR) with every IRQ masked and the CPU's interrupts off: down,
+ * up once its device raises it, down again once the device lowers it. POST codes C8h-CFh: the step running.
+ ****************************************************************/
+
+enum { IRQ_UNTESTED, IRQ_OK, IRQ_HIGH, IRQ_NONE, IRQ_KEPT };
+static const char * const IrqFault[] = {
+    "", "", "up before its device raised it", "never reaches the PIC", "stays up after its device lowered it"
+};
+static u8 IrqResult[16];
+static int BtRow;
+
+static void
+bt_printf(int bad, const char *fmt, ...)
+{
+    char line[81];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    if (BtRow < ROW_HELP)
+        scr_puts(BtRow++, 3, bad ? AttrSelect : AttrText, line);
+}
+
+static int
+irq_up(int irq)
+{
+    u16 port = irq < 8 ? PORT_PIC1_CMD : PORT_PIC2_CMD;
+    outb(0x0a, port);                           // OCW3: read the IRR (the PICs' default)
+    return inb(port) >> (irq & 7) & 1;
+}
+
+// Step 0 before its device raises the line, 1 after, 2 after it lowers it: the IRR bit must follow within 100 ms.
+static void
+irq_step(int irq, int step)
+{
+    if (!IrqResult[irq])
+        IrqResult[irq] = IRQ_OK;
+    u32 end = timer_calc(100);
+    while (irq_up(irq) != (step == 1))
+        if (timer_check(end)) {
+            if (IrqResult[irq] == IRQ_OK)
+                IrqResult[irq] = IRQ_HIGH + step;
+            return;
+        }
+}
+
+static void
+irq_uart(u16 port, int irq)
+{
+    u8 ier = inb(port + 1), mcr = inb(port + 4);
+    outb(0, port + 1);
+    outb(mcr | 0x08, port + 4);                 // OUT2: the UART drives its IRQ line
+    irq_step(irq, 0);
+    outb(0x02, port + 1);                       // transmitter empty interrupt: at once, nothing is sent
+    irq_step(irq, 1);
+    outb(0, port + 1);
+    irq_step(irq, 2);
+    outb(ier, port + 1);
+    outb(mcr, port + 4);
+}
+
+// IRQ 8 by the RTC's periodic interrupt; unmasked in the slave PIC, it requests IRQ 2 of the master (the cascade).
+static void
+irq_rtc(void)
+{
+    u8 b = rtc_read(CMOS_STATUS_B), off = b & ~(RTC_B_PIE | RTC_B_AIE | RTC_B_UIE);
+    rtc_write(CMOS_STATUS_B, off);
+    rtc_read(CMOS_STATUS_C);
+    outb(0xfe, PORT_PIC2_DATA);
+    irq_step(8, 0);
+    irq_step(2, 0);
+    rtc_write(CMOS_STATUS_B, off | RTC_B_PIE);
+    irq_step(8, 1);
+    irq_step(2, 1);
+    rtc_write(CMOS_STATUS_B, off);
+    rtc_read(CMOS_STATUS_C);
+    irq_step(8, 2);
+    irq_step(2, 2);
+    outb(0xff, PORT_PIC2_DATA);
+    rtc_write(CMOS_STATUS_B, b);
+}
+
+// CPUID's FPU flag; without CPUID (early 486), the FPU's status word after FNINIT, unless CR0.EM sends FPU
+// instructions to an emulator.
+static int
+fpu_present(void)
+{
+    char vendor[13];
+    u32 fms, features;
+    u16 sw = 0xffff;
+    if (cpu_ident(vendor, &fms, &features))
+        return features & 1;
+    if (cr0_read() & CR0_EM)
+        return 0;
+    asm volatile("fninit; fnstsw %0" : "+m"(sw));
+    return sw == 0;
+}
+
+// IRQ 13 by FERR#: a divide by zero with that exception unmasked and CR0.NE off (DOS-style FPU errors).
+// No waiting FPU instruction runs while it is pending: the 486 would wait for the interrupt.
+static void
+irq_fpu(void)
+{
+    static const u16 cw = 0x037b;
+    u32 cr0 = cr0_read();
+    cr0_write(cr0 & ~CR0_NE);
+    asm volatile("fninit");
+    irq_step(13, 0);
+    asm volatile("fldcw %0; fldz; fld1; fdiv %%st(1), %%st" : : "m"(cw));
+    irq_step(13, 1);
+    outb(0, 0xf0);                              // the chipset's FERR# latch cleared
+    asm volatile("fnclex");
+    irq_step(13, 2);
+    asm volatile("fninit");
+    cr0_write(cr0);
+}
+
+// The alternate status (it leaves the interrupt pending) once BSY is clear and, if want, DRQ or ERR is set;
+// -1 after ms.
+static int
+ide_ready(struct atadrive_s *ad, int want, u32 ms)
+{
+    u32 end = timer_calc(ms);
+    ndelay(400);
+    for (;;) {
+        u8 st = inb(ad->chan_gf->iobase2 + ATA_CB_ASTAT);
+        if (!(st & ATA_CB_STAT_BSY) && (!want || (st & (ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR))))
+            return st;
+        if (timer_check(end))
+            return -1;
+    }
+}
+
+static struct atadrive_s *
+ide_select(int idx)
+{
+    struct atadrive_s *ad = container_of(IdeInfo[idx].drive, struct atadrive_s, drive);
+    outb(ad->slave ? ATA_CB_DH_DEV1 : ATA_CB_DH_DEV0, ad->chan_gf->iobase1 + ATA_CB_DH);
+    ide_ready(ad, 0, 500);
+    return ad;
+}
+
+// IRQ 14/15 by CHECK POWER MODE (no data; its end interrupts, an abort too), the drive's interrupt on meanwhile.
+static void
+irq_ide(int idx)
+{
+    struct atadrive_s *ad = ide_select(idx);
+    u16 io = ad->chan_gf->iobase1, dc = ad->chan_gf->iobase2 + ATA_CB_DC;
+    int irq = 14 + ad->chan_gf->chanid;         // the onboard channels: SeaBIOS sees them in PCI native mode
+    inb(io + ATA_CB_STAT);
+    outb(ATA_CB_DC_HD15, dc);
+    irq_step(irq, 0);
+    outb(0xe5, io + ATA_CB_CMD);
+    ide_ready(ad, 0, 500);
+    irq_step(irq, 1);
+    inb(io + ATA_CB_STAT);                      // reading the status lowers it
+    irq_step(irq, 2);
+    outb(ATA_CB_DC_HD15 | ATA_CB_DC_NIEN, dc);
+}
+
+// Bits that read back wrong in an 8- or 16-bit register through 'write' and 'read' (walking one and zero, 00..FF, 55, AA).
+static u16
+reg_test(int bits, void (*write)(u16 port, u16 v), u16 (*read)(u16 port), u16 port)
+{
+    u16 bad = 0, mask = bits == 8 ? 0xff : 0xffff;
+    for (int k = 0; k < 2 * bits + 4; k++) {
+        u16 v = k < bits ? 1 << k : k < 2 * bits ? ~(1 << (k - bits))
+            : (u16[]){ 0, 0xffff, 0x5555, 0xaaaa }[k - 2 * bits];
+        write(port, v & mask);
+        bad |= (read(port) ^ v) & mask;
+    }
+    return bad;
+}
+
+static void io8_write(u16 port, u16 v) { outb(v, port); }
+static u16 io8_read(u16 port) { return inb(port); }
+
+// 8237 base/current address or count: two bytes through the flip-flop (port: register, its controller's flip-flop
+// clear in the high byte)
+static void
+dma_write(u16 port, u16 v)
+{
+    outb(0, port >> 8);
+    outb(v, port & 0xff);
+    outb(v >> 8, port & 0xff);
+}
+
+static u16
+dma_read(u16 port)
+{
+    outb(0, port >> 8);
+    u16 v = inb(port & 0xff);
+    return v | inb(port & 0xff) << 8;
+}
+
+static void
+bt_irqs(void)
+{
+    const char *owner[16];
+    char line[80];
+    u8 imr1 = inb(PORT_PIC1_DATA), imr2 = inb(PORT_PIC2_DATA);
+    int i, n;
+    post_code(0xc8);
+    memset(IrqResult, 0, sizeof(IrqResult));
+    u32 flags = save_flags();
+    irq_disable();
+    u16 bad_imr = reg_test(8, io8_write, io8_read, PORT_PIC1_DATA) | reg_test(8, io8_write, io8_read, PORT_PIC2_DATA) << 8;
+    outb(0xff, PORT_PIC1_DATA);
+    outb(0xff, PORT_PIC2_DATA);
+    ps2_irq_step(0);
+    irq_step(1, 0);
+    ps2_irq_step(1);
+    irq_step(1, 1);
+    ps2_irq_step(2);
+    irq_step(1, 2);
+    for (i = 0; i < 4; i++) {
+        u16 port = GET_BDA(port_com[i]);
+        if (port)
+            irq_uart(port, (port == 0x3f8 || port == 0x3e8) ? 4 : 3);
+    }
+    if (Setting[NB_FDC]) {
+        floppy_reset_step(0);
+        irq_step(6, 0);
+        floppy_reset_step(1);
+        irq_step(6, 1);
+        floppy_reset_step(2);
+        irq_step(6, 2);
+    }
+    irq_rtc();
+    if (fpu_present())
+        irq_fpu();
+    for (i = 0; i < 4; i++)                     // the first drive of each channel
+        if (IdeInfo[i].present && !((i & 1) && IdeInfo[i - 1].present))
+            irq_ide(i);
+    outb(imr1, PORT_PIC1_DATA);
+    outb(imr2, PORT_PIC2_DATA);
+    restore_flags(flags);
+    u32 ticks = GET_BDA(timer_counter);         // IRQ 0 to its handler: 10 ticks in 550 ms
+    msleep(550);
+    ticks = GET_BDA(timer_counter) - ticks;
+    IrqResult[0] = ticks >= 9 && ticks <= 11 ? IRQ_OK : IRQ_NONE;
+
+    irq_owners(owner);
+    char *p = line + snprintf(line, sizeof(line), "IRQ lines    :");
+    for (i = n = 0; i < 16; i++)
+        if (IrqResult[i] == IRQ_OK)
+            p += snprintf(p, line + sizeof(line) - p, " %d", i), n++;
+    snprintf(p, line + sizeof(line) - p, "%s, PIC masks %s", n ? " OK" : " none OK", bad_imr ? "BAD" : "OK");
+    bt_printf(bad_imr != 0, "%s", line);
+    if (bad_imr) {
+        bt_printf(1, "  PIC mask bits wrong: master %02x, slave %02x", bad_imr & 0xff, bad_imr >> 8);
+    }
+    for (i = 0; i < 16; i++)
+        if (IrqResult[i] > IRQ_OK) {
+            if (i)
+                snprintf(line, sizeof(line), "  IRQ %d (%s): %s", i, owner[i], IrqFault[IrqResult[i]]);
+            else
+                snprintf(line, sizeof(line), "  IRQ 0 (%s): %d ticks in 550 ms, 10 expected", owner[0], ticks);
+            bt_printf(1, "%s", line);
+        }
+    p = line + snprintf(line, sizeof(line), "  not tested (no device here drives them):");
+    for (i = 0; i < 16; i++)
+        if (!IrqResult[i])
+            p += snprintf(p, line + sizeof(line) - p, " %d", i);
+    bt_printf(0, "%s", line);
+}
+
+// PIT clocks (1193182 Hz) since *last: channel 0 counts down from 65536, so read it at least every 50 ms.
+static u32
+pit_since(u16 *last)
+{
+    outb(0x00, 0x43);                           // latch channel 0
+    u16 now = inb(0x40);
+    now |= inb(0x40) << 8;
+    u16 d = *last - now;
+    *last = now;
+    return d;
+}
+
+// PIT clocks from the end of an RTC update to the next one; 0 if the RTC does not tick within 3 s (or the PIT
+// does not count: 2 million polls, some 10 s).
+static u32
+rtc_second(void)
+{
+    u32 clocks = 0, total = 0, polls = 0;
+    u16 last;
+    pit_since(&last);
+    for (int phase = 0; phase < 4; phase++) {   // an update starts, ends (counted from here), the next starts, ends
+        int uip = !(phase & 1);
+        while (!!(rtc_read(CMOS_STATUS_A) & RTC_A_UIP) != uip) {
+            u32 d = pit_since(&last);
+            clocks += d;
+            total += d;
+            if (total > 3 * 1193182 || ++polls > 2000000)
+                return 0;
+        }
+        if (phase == 1)
+            clocks = 0;
+    }
+    return clocks;
+}
+
+static void
+bt_timers(void)
+{
+    post_code(0xc9);
+    u32 toggles = 0, clocks = 0, ch2 = 0, polls; // channel 1: each refresh request toggles port 61h bit 4
+    u16 pit;
+    u8 b61 = inb(0x61), last = b61 & 0x10;
+    pit_since(&pit);
+    for (polls = 0; clocks < 11932 && polls < 200000; polls++) {   // 10 ms
+        u8 b = inb(0x61) & 0x10;
+        toggles += b != last;
+        last = b;
+        clocks += pit_since(&pit);
+    }
+    if (clocks < 11932) {
+        bt_printf(1, "PIT timers   : channel 0 does not count (the system timer)");
+        return;
+    }
+    u32 refresh_ns = toggles ? 10000000 / toggles : 0;   // 15085 ns: count 18
+    outb(b61 & ~0x03, 0x61);                    // channel 2: a 10 ms one-shot (mode 0) by its gate, port 61h bit 5
+    outb(0xb0, 0x43);
+    outb(11932 & 0xff, 0x42);
+    outb(11932 >> 8, 0x42);
+    pit_since(&pit);
+    outb((b61 & ~0x02) | 0x01, 0x61);
+    for (polls = 0; !(inb(0x61) & 0x20) && ch2 < 5 * 11932 && polls < 200000; polls++)
+        ch2 += pit_since(&pit);
+    outb(b61, 0x61);
+    int bad = refresh_ns < 13600 || refresh_ns > 16600 || ch2 < 11813 || ch2 > 12051;
+    bt_printf(bad, "PIT timers   : ch1 refresh request every %d.%d us, ch2 %d.%d ms (10.0): %s", refresh_ns / 1000,
+              refresh_ns % 1000 / 100, ch2 / 1193, ch2 % 1193 * 10 / 1193, bad ? "BAD" : "OK");
+    if (!refresh_ns)
+        bt_printf(1, "  no refresh request: the DRAM is not refreshed (PIT channel 1)");
+    u32 ticks = rtc_second();
+    if (!ticks) {
+        bt_printf(1, "RTC crystal  : the RTC does not tick (no update in 3 s): its crystal or battery");
+        return;
+    }
+    int ppm = ((int)ticks - 1193182) * 838 / 1000, abs = ppm < 0 ? -ppm : ppm, day10 = abs * 864 / 1000;
+    bt_printf(abs > 200, "RTC crystal  : %s%d ppm against the 14.318 MHz clock, %d.%d s/day %s: %s", ppm > 0 ? "+" : "",
+              ppm, day10 / 10, day10 % 10, ppm > 0 ? "slow" : "fast", abs > 200 ? "OFF" : "OK");
+}
+
+static void
+bt_dma(void)
+{
+    static const u8 page[8] = { 0x87, 0x83, 0x81, 0x82, 0x8f, 0x8b, 0x89, 0x8a };   // channels 0-7 (4: refresh)
+    u16 bad[8][3];
+    int failed = 0;
+    post_code(0xca);
+    memset(bad, 0, sizeof(bad));
+    for (int ch = 0; ch < 8; ch++) {
+        if (ch != 4) {
+            u16 ff = ch < 4 ? 0x0c : 0xd8, addr = ch < 4 ? ch * 2 : 0xc0 + (ch - 4) * 4;
+            outb((ch & 3) | 4, ch < 4 ? 0x0a : 0xd4);   // masked (they all are after the POST)
+            bad[ch][0] = reg_test(16, dma_write, dma_read, ff << 8 | addr);
+            bad[ch][1] = reg_test(16, dma_write, dma_read, ff << 8 | (addr + (ch < 4 ? 1 : 2)));
+        }
+        u8 save = inb(page[ch]);
+        bad[ch][2] = reg_test(8, io8_write, io8_read, page[ch]);
+        outb(save, page[ch]);
+        failed |= bad[ch][0] | bad[ch][1] | bad[ch][2];
+    }
+    if (failed)
+        bt_printf(1, "DMA 8237     : register bits that read back wrong:");
+    else
+        bt_printf(0, "DMA 8237     : address, count and page registers of channels 0-3, 5-7: OK");
+    for (int ch = 0; ch < 8 && failed; ch++)
+        if (bad[ch][0] | bad[ch][1] | bad[ch][2]) {
+            bt_printf(1, "  channel %d: address %04x, count %04x, page register %02x: %02x", ch, bad[ch][0], bad[ch][1],
+                      page[ch], bad[ch][2]);
+        }
+}
+
+// Drive A's first sector read into buf by the floppy driver (the drives get INT 13h numbers only at boot), 3 tries:
+// the first may report a disk change. 0 or its error.
+static int
+floppy_read_sector(struct drive_s *drive, u8 *buf)
+{
+    int err = 0;
+    for (int t = 0; t < 3; t++) {
+        struct disk_op_s op;
+        memset(&op, 0, sizeof(op));
+        op.drive_fl = drive;
+        op.command = CMD_READ;
+        op.count = 1;
+        op.buf_fl = buf;
+        if (!(err = floppy_process_op(&op)))
+            return 0;
+    }
+    return err;
+}
+
+static void
+bt_floppy(void)
+{
+    struct drive_s *drives[2], *a_drive = NULL;
+    const char *descs[2];
+    char line[80];
+    post_code(0xca);
+    for (int i = boot_drive_list(0x01, drives, descs, 2); i-- > 0; )
+        if (drives[i]->cntl_id == 0)
+            a_drive = drives[i];
+    if (!a_drive) {
+        bt_printf(1, "Floppy DMA   : no drive A (none in setup, or it did not answer at POST)");
+        return;
+    }
+    u8 *a = memalign_tmplow(512, 512), *b = memalign_tmplow(512, 512);
+    int err = !a || !b ? -1 : floppy_read_sector(a_drive, a) ?: floppy_read_sector(a_drive, b);
+    if (err)
+        snprintf(line, sizeof(line), "Floppy DMA   : drive A: read error %02x (no diskette, drive, cable, DMA 2)", err);
+    else
+        snprintf(line, sizeof(line), "Floppy DMA   : 2 reads of A: sector 1 by DMA 2: %s, %s", memcmp(a, b, 512)
+                 ? "DIFFER" : "equal", a[510] == 0x55 && a[511] == 0xaa ? "boot signature 55AA" : "no boot signature");
+    bt_printf(err || memcmp(a, b, 512), "%s", line);
+    free(a);
+    free(b);
+}
+
+// The cable of an IDE drive: a 512-byte pattern through WRITE BUFFER and READ BUFFER, with 16-bit then 32-bit I/O:
+// the data bits that came back wrong in each, -1 if the drive has no such commands.
+static int
+ide_buffer_test(int idx, u16 bad[2])
+{
+    u16 *out = malloc_tmphigh(1024), *in = out + 256, v = 0x1234;
+    struct atadrive_s *ad = ide_select(idx);
+    u16 io = ad->chan_gf->iobase1;
+    int ret = 0;
+    if (!out)
+        return -1;
+    for (int k = 0; k < 256; k++, v = v * 31421 + 6927)  // walking one and zero, 5555/AAAA, then random
+        out[k] = k < 16 ? 1 << k : k < 32 ? ~(1 << (k - 16)) : k < 48 ? (k & 1 ? 0xaaaa : 0x5555) : v;
+    for (int wide = 0; wide < 2 && !ret; wide++) {
+        outb(0xe8, io + ATA_CB_CMD);
+        int st = ide_ready(ad, 1, 500);
+        if (st < 0 || (st & ATA_CB_STAT_ERR) || !(st & ATA_CB_STAT_DRQ)) {
+            ret = -1;
+            break;
+        }
+        if (wide)
+            outsl(io, (u32 *)out, 128);
+        else
+            outsw(io, out, 256);
+        ide_ready(ad, 0, 500);
+        outb(0xe4, io + ATA_CB_CMD);
+        st = ide_ready(ad, 1, 500);
+        if (st < 0 || (st & ATA_CB_STAT_ERR) || !(st & ATA_CB_STAT_DRQ)) {
+            ret = -1;
+            break;
+        }
+        if (wide)
+            insl(io, (u32 *)in, 128);
+        else
+            insw(io, in, 256);
+        ide_ready(ad, 0, 500);
+        for (int k = 0; k < 256; k++)
+            bad[wide] |= in[k] ^ out[k];
+    }
+    free(out);
+    return ret;
+}
+
+// " DDn" for each bit of bad (16 bits).
+static void
+dd_lines(char *p, int size, u16 bad)
+{
+    char *end = p + size;
+    for (int b = 0; b < 16; b++)
+        if (bad >> b & 1)
+            p += snprintf(p, end - p, " DD%d", b);
+}
+
+static void
+bt_ide(void)
+{
+    char line[80];
+    post_code(0xcb);
+    for (int i = 0; i < 4; i++) {
+        u16 bad[2] = { 0, 0 };
+        if (!IdeInfo[i].present)
+            continue;
+        if (IdeInfo[i].atapi) {
+            bt_printf(0, "IDE %s: CD-ROM, not tested (no buffer commands)", IdeUnitShort[i]);
+            continue;
+        }
+        int ret = ide_buffer_test(i, bad);
+        int n = snprintf(line, sizeof(line), "IDE %s: ", IdeUnitShort[i]);
+        if (ret)
+            snprintf(line + n, sizeof(line) - n, "not tested (the drive has no WRITE/READ BUFFER)");
+        else if (!bad[0] && !bad[1])
+            snprintf(line + n, sizeof(line) - n, "cable data lines OK, 16-bit and 32-bit I/O (512 bytes)");
+        else {
+            n += snprintf(line + n, sizeof(line) - n, "data lines wrong, 16-bit:");
+            dd_lines(line + n, sizeof(line) - n, bad[0]);
+            n = strlen(line);
+            n += snprintf(line + n, sizeof(line) - n, "; 32-bit:");
+            dd_lines(line + n, sizeof(line) - n, bad[1]);
+        }
+        bt_printf(!ret && (bad[0] || bad[1]), "%s", line);
+    }
+}
+
+// Memory on a bus at [s, e): saved, walking one, walking zero and the address written and read, restored: the bits
+// that differed (*first: the first address). The caches are off meanwhile.
+static u32
+bus_ram_test(u32 s, u32 e, u32 *first)
+{
+    volatile u32 *m = (void *)s;
+    u32 n = (e - s) / 4, bad = 0, *save = malloc_tmphigh(e - s), cr0 = cr0_read();
+    if (!save)
+        return 0;
+    cr0_write(cr0 | CR0_CD);
+    wbinvd();
+    memcpy(save, (void *)s, e - s);
+    for (int pass = 0; pass < 3; pass++) {
+        for (u32 i = 0; i < n; i++)
+            m[i] = pass == 2 ? (s + 4 * i) ^ 0x5aa5c33c : pass ? ~(1u << (i & 31)) : 1u << (i & 31);
+        for (u32 i = 0; i < n; i++) {
+            u32 d = m[i] ^ (pass == 2 ? (s + 4 * i) ^ 0x5aa5c33c : pass ? ~(1u << (i & 31)) : 1u << (i & 31));
+            if (d && !bad)
+                *first = s + 4 * i;
+            bad |= d;
+        }
+    }
+    memcpy((void *)s, save, e - s);
+    cr0_write(cr0);
+    free(save);
+    return bad;
+}
+
+static void gfx_reg(u8 index, u8 val);
+
+// INT 10h AX=4F0xh (VESA BIOS) with ES:DI = buf: 1 when it answers 004Fh.
+static int
+vbe_call(u16 ax, u16 bx, u16 cx, u16 dx, void *buf)
+{
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.flags = F_IF;
+    br.ax = ax;
+    br.bx = bx;
+    br.cx = cx;
+    br.dx = dx;
+    br.es = FLATPTR_TO_SEG(buf);
+    br.di = FLATPTR_TO_OFFSET(buf);
+    call16_int(0x10, &br);
+    return br.ax == 0x004f;
+}
+
+struct vbe_pick { u16 mode, gran; int fb; u32 lfb; };
+
+// A PCI display card's memory BAR starts at lfb: the linear frame buffer the VESA BIOS reports is the card's.
+static int
+vga_bar_at(u32 lfb)
+{
+    struct pci_device *pci;
+    foreachpci(pci)
+        for (int b = 0; b < 6 && pci->class >> 8 == PCI_BASE_CLASS_DISPLAY; b++) {
+            u32 bar = pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_0 + 4 * b);
+            if (!(bar & PCI_BASE_ADDRESS_SPACE_IO) && (bar & ~0xf) == lfb)
+                return 1;
+        }
+    return 0;
+}
+
+// The VESA mode of the test (info: the VESA BIOS's; mode: 256 bytes for a mode's). One with a linear frame buffer
+// where a PCI display card's memory is (VESA 2.0): the whole memory without a window. Else the one with a 64K window A
+// at A0000 that reads
+// and writes whose frame buffer is the largest (the window may reach no further: 4K steps of an 8-bit bank register
+// stop at 1 MB), a 256-color one first (the windows of the others fail on some cards). Not 16-color ones: their
+// window reaches planes.
+static void
+vbe_pick_mode(u8 *info, u8 *mode, struct vbe_pick *p)
+{
+    static const u16 height[8] = { 400, 480, 0, 600, 0, 768, 0, 1024 };   // VESA modes 100h-107h
+    u16 *list = MAKE_FLATPTR(*(u16 *)(info + 16), *(u16 *)(info + 14));
+    int best = 0;
+    for (int i = 0; i < 256 && list[i] != 0xffff && !p->lfb; i++) {
+        u16 m = list[i];
+        if (m < 0x100 || !vbe_call(0x4f01, 0, m, 0, mode))
+            continue;
+        u16 attr = *(u16 *)mode, step = *(u16 *)(mode + 4);
+        u32 lfb = *(u32 *)(mode + 0x28), lines = attr & 2 ? *(u16 *)(mode + 0x14) : m < 0x108 ? height[m - 0x100] : 0;
+        int packed = attr & 2 ? (mode[0x1b] == 4 || mode[0x1b] == 6) && mode[0x19] >= 8   // memory model, bits
+                              : m == 0x100 || (m < 0x108 && (m & 1));                     // VESA's 256-color ones
+        int units = (*(u16 *)(mode + 0x10) * lines + 0xffff) >> 16;
+        int rank = (!(attr & 2) || mode[0x19] == 8) << 16 | units;
+        if ((attr & 0x11) != 0x11 || !packed)   // supported, graphics
+            continue;
+        if ((attr & 0x80) && *(u16 *)(info + 4) >= 0x0200 && lfb && vga_bar_at(lfb)) {
+            p->mode = m | 0x4000;               // with its linear frame buffer
+            p->lfb = lfb;
+        } else if (!(attr & 0x40) && (mode[2] & 7) == 7 && *(u16 *)(mode + 6) == 64 && *(u16 *)(mode + 8) == 0xa000
+                   && step && rank > best) {    // windowed; window A exists, R/W
+            best = rank;
+            p->mode = m;
+            p->gran = step;
+            p->fb = units;
+        }
+    }
+}
+
+// The address of 64K unit u of the video memory: in the linear frame buffer; else at A0000, once the VESA window or
+// the standard VGA plane is moved there.
+static u32
+vram_unit(struct vbe_pick *p, int u)
+{
+    if (p->lfb)
+        return p->lfb + u * 0x10000;
+    if (p->mode)
+        vbe_call(0x4f05, 0, 0, u * 64 / p->gran, NULL);
+    else {
+        outb(0x02, 0x3c4);
+        outb(1 << u, 0x3c5);                    // map mask: writes to plane u
+        gfx_reg(4, u);                          // read map select
+    }
+    return 0xa0000;
+}
+
+// The whole video memory, the size the VESA BIOS reports, through a mode it offers (vbe_pick_mode); without one, the 4
+// planes of a standard VGA (256K, mode 12h). Each 64K unit is tagged first: one that reads the tag of another at a
+// distance of a window mode's frame buffer or more marks how far the window reaches; else an alias (an address line,
+// or less memory than reported). Then each unit is written and read (bus_ram_test). Leaves a graphics mode on: the
+// caller sets the text mode again.
+static void
+vram_test(char *line, int size, int *bad)
+{
+    u8 *info = memalign_tmplow(16, 512 + 256), *mode = info + 512;
+    struct vbe_pick p;
+    int units = 4, total = 4, lost = 0, first_lost = 0, u;
+    u32 bits = 0, at = 0, a = 0;
+    if (!info) {
+        *bad = snprintf(line, size, "Video memory : no memory for its test");
+        return;
+    }
+    memset(info, 0, 512 + 256);
+    memset(&p, 0, sizeof(p));
+    if (vbe_call(0x4f00, 0, 0, 0, info) && !memcmp(info, "VESA", 4) && *(u16 *)(info + 4) >= 0x0101
+        && *(u16 *)(info + 18) && *(u16 *)(info + 18) <= 256) {   // its memory size (VESA 1.1), 16 MB at most
+        vbe_pick_mode(info, mode, &p);
+        if (p.mode && vbe_call(0x4f02, p.mode, 0, 0, NULL))
+            units = total = *(u16 *)(info + 18);
+        else
+            memset(&p, 0, sizeof(p));
+    }
+    if (!p.mode) {
+        struct bregs br;
+        memset(&br, 0, sizeof(br));
+        br.flags = F_IF;
+        br.ax = 0x1a00;                         // display combination: a VGA BIOS answers 1Ah
+        call16_int(0x10, &br);
+        int10(0x0012, 0);
+        if (br.al != 0x1a || GET_BDA(video_mode) != 0x12) {
+            free(info);
+            snprintf(line, size, "Video memory : not a VGA (no mode 12h), not tested");
+            return;
+        }
+        gfx_reg(1, 0x00);                       // no set/reset: CPU data to the planes
+        gfx_reg(3, 0x00);
+        gfx_reg(5, 0x00);                       // write and read mode 0
+        gfx_reg(8, 0xff);
+    }
+    int reach = units;
+    for (int pass = 0; pass < 2; pass++)
+        for (u = 0; u < units; u++) {         // a unit that reads another's tag (other errors: below)
+            volatile u32 *w = (void *)vram_unit(&p, u);
+            u32 tag = w[0];
+            int dist = (tag & 0xffff) - u;
+            if (!pass)
+                w[0] = 0x5aa50000 | u;
+            else if (tag == (0x5aa50000 | u) || tag >> 16 != 0x5aa5 || (tag & 0xffff) >= units)
+                continue;
+            else if (p.mode && !p.lfb && dist >= p.fb) {
+                if (dist < reach)               // the window wrapped there
+                    reach = dist;
+            } else if (!lost++)
+                first_lost = u;
+        }
+    units = reach;
+    for (u = 0; u < units && !bits; u++) {
+        a = vram_unit(&p, u);
+        bits = bus_ram_test(a, a + 0x10000, &at);
+    }
+    free(info);
+    *bad = lost || bits;
+    if (lost)
+        snprintf(line, size, "Video memory : %d of %d 64K units lose their data, first at %dK: an alias", lost,
+                 units, first_lost * 64);
+    else if (bits)
+        snprintf(line, size, "Video memory : bits %08x wrong at %dK + %x", bits, (u - 1) * 64, at - a);
+    else if (!p.mode)
+        snprintf(line, size, "Video memory : 256K, the VGA planes (no VESA BIOS): OK");
+    else if (p.lfb)
+        snprintf(line, size, "Video memory : %dK, the linear frame buffer at %x: OK", units * 64, p.lfb);
+    else if (units < total)
+        snprintf(line, size, "Video memory : %dK of %dK, all the window of VESA mode %xh reaches: OK", units * 64,
+                 total * 64, p.mode);
+    else
+        snprintf(line, size, "Video memory : %dK, the window of VESA mode %xh: OK", units * 64, p.mode);
+}
+
+// PCI error bits: cleared (written with 1) before the board test; afterwards those set meanwhile.
+static void
+pci_errors_clear(void)
+{
+    struct pci_device *pci;
+    foreachpci(pci)
+        pci_config_writew(pci->bdf, PCI_STATUS, 0xf900);
+}
+
+static void
+bt_pci(void)
+{
+    static const struct { u16 bit; const char *name; } err[] = {
+        { 0x8000, "parity error" }, { 0x4000, "SERR#" }, { 0x2000, "master abort" }, { 0x1000, "target abort" },
+        { 0x0800, "signaled target abort" }, { 0x0100, "data parity" },
+    };
+    char line[80];
+    struct pci_device *pci;
+    int devices = 0, bad = 0;
+    foreachpci(pci) {
+        u16 st = pci_config_readw(pci->bdf, PCI_STATUS) & 0xf900;
+        u8 devfn = pci_bdf_to_devfn(pci->bdf);
+        devices++;
+        if (!st)
+            continue;
+        int n = snprintf(line, sizeof(line), "  %02x:%02x.%x %s:", pci_bdf_to_bus(pci->bdf), devfn >> 3, devfn & 7,
+                         pci_class_name(pci->class));
+        for (int i = 0; i < ARRAY_SIZE(err); i++)
+            if (st & err[i].bit)
+                n += snprintf(line + n, sizeof(line) - n, " %s", err[i].name);
+        if (!bad++)
+            bt_printf(1, "PCI bus      : error bits set during the board test:");
+        bt_printf(1, "%s", line);
+        pci_config_writew(pci->bdf, PCI_STATUS, st);
+    }
+    if (!bad)
+        bt_printf(0, "PCI bus      : no parity or abort error on %d devices", devices);
+}
+
+// CMOS RAM 0Eh-7Fh, not 0Fh (the shutdown code a reset meanwhile would act on) nor 32h (the century some RTCs
+// count): each byte its index, then its complement; restored.
+static u8
+cmos_ram_test(void)
+{
+    u8 save[128], bad = 0;
+    for (int r = 0x0e; r < 0x80; r++)
+        save[r] = rtc_read(r);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int r = 0x0e; r < 0x80; r++)
+            if (r != 0x0f && r != 0x32)
+                rtc_write(r, pass ? ~r : r);
+        for (int r = 0x0e; r < 0x80; r++)
+            if (r != 0x0f && r != 0x32)
+                bad |= rtc_read(r) ^ (u8)(pass ? ~r : r);
+    }
+    for (int r = 0x0e; r < 0x80; r++)
+        rtc_write(r, save[r]);
+    return bad;
+}
+
+static void
+bt_isa_io(void)
+{
+    char line[80];
+    post_code(0xcd);
+    u32 flags = save_flags();
+    irq_disable();
+    int n = snprintf(line, sizeof(line), "ISA I/O      :"), bad = 0;
+    for (int i = 0; i < 4; i++) {
+        u16 port = GET_BDA(port_com[i]);
+        if (!port)
+            continue;
+        u8 save = inb(port + 7), wrong = reg_test(8, io8_write, io8_read, port + 7);
+        outb(save, port + 7);
+        n += snprintf(line + n, sizeof(line) - n, wrong ? " UART %x scratch bits %02x BAD," : " UART %x OK,", port,
+                      wrong);
+        bad |= wrong;
+    }
+    u8 cmos = cmos_ram_test();
+    restore_flags(flags);
+    snprintf(line + n, sizeof(line) - n, cmos ? " CMOS RAM bits %02x BAD" : " CMOS RAM 112 bytes OK", cmos);
+    bt_printf(bad || cmos, "%s", line);
+}
+
+// Two dwords at a, each with its own pattern: RAM if both read back (a floating bus returns the last one written).
+static int
+isa_ram_at(volatile u32 *a)
+{
+    u32 s0 = a[0], s1 = a[1];
+    a[0] = 0x5aa5c33c;
+    a[1] = 0xa55a3cc3;
+    int ram = a[0] == 0x5aa5c33c && a[1] == 0xa55a3cc3;
+    a[0] = s0;
+    a[1] = s1;
+    return ram;
+}
+
+// The 16K blocks of C8000-DFFFF the chipset leaves on the ISA bus: option ROMs checksummed; RAM, in the blocks
+// without a ROM (cards keep registers next to their ROM), written and read with the writes sent to the ISA bus.
+static void
+bt_isa_mem(void)
+{
+    char line[80];
+    u8 hb54 = pci_config_readb(HB_BDF, 0x54), unit[48] = { 0 };   // per 2K: 1 ROM block, 2 RAM
+    int found = 0;
+    post_code(0xce);
+    for (u32 a = 0xc8000; a < 0xe0000; a += 2048) {
+        struct rom_header *rom = (void *)a;
+        int u = (a - 0xc8000) / 2048;
+        if ((hb54 >> (2 + u / 8) & 1) || rom->signature != OPTION_ROM_SIGNATURE || !rom->size)
+            continue;
+        u32 len = rom->size * 512, end = a + len < 0xe0000 ? a + len : 0xe0000;
+        bt_printf(checksum(rom, end - a) != 0, "ISA ROM      : %x-%x (%dK): checksum %s", a, end - 1, len >> 10,
+                  checksum(rom, end - a) ? "BAD (the ROM, or the slot's lines)" : "OK");
+        found++;
+        for (int k = u / 8 * 8; k < ((end - 0xc8000 + 0x3fff) / 0x4000) * 8; k++)
+            unit[k] = 1;
+        a = ALIGN(end, 2048) - 2048;
+    }
+    u32 flags = save_flags();
+    irq_disable();
+    umc_isa_writes(1);
+    for (int u = 0; u < 48; u++)
+        if (!(hb54 >> (2 + u / 8) & 1) && !unit[u] && isa_ram_at((void *)(0xc8000 + u * 2048)))
+            unit[u] = 2;
+    umc_isa_writes(0);
+    restore_flags(flags);
+    for (int u = 0; u < 48; u++) {
+        if (unit[u] != 2)
+            continue;
+        int v = u;
+        while (v < 48 && unit[v] == 2)
+            v++;
+        u32 s = 0xc8000 + u * 2048, e = 0xc8000 + v * 2048, first = 0;
+        flags = save_flags();
+        irq_disable();
+        umc_isa_writes(1);
+        u32 bad = bus_ram_test(s, e, &first);
+        umc_isa_writes(0);
+        restore_flags(flags);
+        if (bad)
+            snprintf(line, sizeof(line), "ISA RAM      : %x-%x (%dK): bits %08x wrong, first at %x", s, e - 1,
+                     (e - s) >> 10, bad, first);
+        else
+            snprintf(line, sizeof(line), "ISA RAM      : %x-%x (%dK) written and read: OK", s, e - 1, (e - s) >> 10);
+        bt_printf(bad != 0, "%s", line);
+        found++;
+        u = v;
+    }
+    if (!found)
+        bt_printf(0, "ISA memory   : no card ROM or RAM on the ISA bus in C8000-DFFFF");
+}
+
+static void
+bt_keyboard(void)
+{
+    static const char * const lines[] = { "OK", "clock stuck low", "clock stuck high", "data stuck low",
+                                          "data stuck high" };
+    char why[48];
+    post_code(0xcf);
+    int r = ps2_kbd_line_test();
+    ps2_kbd_failure(why, sizeof(why));
+    bt_printf(!PS2KeyboardOK || r != 0, "Keyboard ctrl: line test now: %s, POST tests: %s",
+              r < 0 ? "no answer" : r < ARRAY_SIZE(lines) ? lines[r] : "unknown answer",
+              PS2KeyboardOK ? "OK" : "FAILED");
+    if (!PS2KeyboardOK) {
+        bt_printf(1, "  at POST:%s", why);
+    }
+}
+
+// An I/O port of the board itself, which the scan does not read: super I/O, IDE, PnP, VGA, floppy, serial, parallel.
+static int
+board_port(u16 port)
+{
+    static const u16 own[][2] = {
+        { 0x108, 2 }, { 0x170, 8 }, { 0x1f0, 8 }, { PNP_READ, 1 }, { PNP_ADDRESS, 1 }, { 0x376, 2 }, { 0x3b0, 0x30 },
+        { 0x3f0, 8 },
+    };
+    int i;
+    for (i = 0; i < ARRAY_SIZE(own); i++)
+        if (port >= own[i][0] && port < own[i][0] + own[i][1])
+            return 1;
+    for (i = 0; i < 7; i++) {
+        u16 base = i < 4 ? GET_BDA(port_com[i]) : GET_BDA(port_lpt[i - 4]);
+        if (base && port >= base && port < base + 8)
+            return 1;
+    }
+    return 0;
+}
+
+// ISA I/O ports 100h-3FFh but the board's: the ranges that answer (a floating bus reads FFh), on up to 2 lines.
+static void
+bt_isa_scan(void)
+{
+    char line[2][80];
+    int n = 0, row = 0, answers = 0, start = 0;
+    post_code(0xce);
+    line[1][0] = 0;
+    for (u16 port = 0x100; port <= 0x400; port++) {
+        int hit = port < 0x400 && !board_port(port) && inb(port) != 0xff;
+        answers += hit;
+        if (hit && !start)
+            start = port;
+        if (hit || !start)
+            continue;
+        if (n > 70 && row < 1) {                // the first line is full
+            row++;
+            n = 0;
+        }
+        if (n < 70)
+            n += snprintf(line[row] + n, sizeof(line[0]) - n, port - 1 > start ? " %x-%x" : " %x", start, port - 1);
+        start = 0;
+    }
+    if (answers > 0x180)
+        bt_printf(1, "ISA I/O scan : most ports read other than FFh: this bus does not float high, no scan");
+    else if (!answers)
+        bt_printf(0, "ISA I/O scan : no card answers in 100-3FF");
+    else {
+        bt_printf(0, "ISA I/O scan :%s", line[0]);
+        if (line[1][0])
+            bt_printf(0, "              %s", line[1]);
+    }
+}
+
+static void
+board_test(void)
+{
+    int key = 0;
+    for (;;) {
+        char vram[80];
+        int vbad = 0;
+        post_code(0xcc);
+        pci_errors_clear();
+        if (Vram == (void *)0xb8000)            // first: it changes the video mode
+            vram_test(vram, sizeof(vram), &vbad);
+        else
+            snprintf(vram, sizeof(vram), "Video memory : monochrome adapter, not tested");
+        scr_open();
+        scr_header("BOARD TEST");
+        scr_printf(ROW_HELP, 2, AttrText, "Testing...");
+        BtRow = 3;
+        bt_irqs();
+        bt_timers();
+        bt_dma();
+        if (key == 0x21)
+            bt_floppy();
+        else
+            bt_printf(0, "Floppy DMA   : F to read drive A (a diskette in it)");
+        bt_ide();
+        bt_printf(vbad, "%s", vram);
+        bt_isa_io();
+        bt_isa_mem();
+        if (key == 0x17)
+            bt_isa_scan();
+        else
+            bt_printf(0, "ISA I/O scan : I to read the ports 100-3FF (a card may hang on a read)");
+        bt_keyboard();
+        bt_pci();
+        post_code(POST_SETUP);
+        scr_printf(ROW_HELP, 2, AttrText, "ESC : Back   R : Run again   F : With the floppy read   I : With the I/O scan");
+        while ((key = get_keystroke(1000)) != 0x01 && key != 0x13 && key != 0x21 && key != 0x17)
+            ;
+        if (key == 0x01)
+            return;
+    }
+}
+
+/****************************************************************
+ * HDD SURFACE SCAN: READ VERIFY of every sector of an IDE drive (nothing transferred), 256 at a time. A failing
+ * command leaves the address of the bad sector in the drive's registers: listed, the scan goes on after it.
+ ****************************************************************/
+
+#define SCAN_ROWS 8                             // bad sectors listed
+
+static void mt_bar(int row, const char *name, u32 done, u32 total);
+static u32 mt_seconds(void);
+
+// VERIFY count (1-256) sectors from lba: 0, or the error register (*bad: the failing sector); -1 if the drive does
+// not answer in 30 s (retries on a bad sector take seconds).
+static int
+ide_verify(struct atadrive_s *ad, u32 lba, int count, u32 *bad)
+{
+    u16 io = ad->chan_gf->iobase1, dc = ad->chan_gf->iobase2 + ATA_CB_DC;
+    u8 dev = ad->slave ? ATA_CB_DH_DEV1 : ATA_CB_DH_DEV0;
+    u32 spt = ad->drive.pchs.sector, heads = ad->drive.pchs.head;
+    int ext = lba + count > 0x10000000;
+    if (ad->chs_only) {                         // by the default geometry, as SeaBIOS addresses it
+        u32 cyl = lba / (spt * heads), rest = lba % (spt * heads);
+        outb(dev | rest / spt, io + ATA_CB_DH);
+        outb(rest % spt + 1, io + ATA_CB_SN);
+        outb(cyl, io + ATA_CB_CL);
+        outb(cyl >> 8, io + ATA_CB_CH);
+    } else {
+        outb(dev | ATA_CB_DH_LBA | (ext ? 0 : lba >> 24), io + ATA_CB_DH);
+        if (ext) {                              // LBA48: the high bytes first
+            outb(0, io + ATA_CB_SC);
+            outb(lba >> 24, io + ATA_CB_SN);
+            outb(0, io + ATA_CB_CL);
+            outb(0, io + ATA_CB_CH);
+        }
+        outb(lba, io + ATA_CB_SN);
+        outb(lba >> 8, io + ATA_CB_CL);
+        outb(lba >> 16, io + ATA_CB_CH);
+    }
+    outb(count, io + ATA_CB_SC);                // 256: 0
+    outb(ext ? 0x42 : 0x40, io + ATA_CB_CMD);
+    int st = ide_ready(ad, 0, 30000);
+    if (st < 0)
+        return -1;
+    if (!(st & ATA_CB_STAT_ERR))
+        return 0;
+    u32 sn = inb(io + ATA_CB_SN), cl = inb(io + ATA_CB_CL), ch = inb(io + ATA_CB_CH), dh = inb(io + ATA_CB_DH) & 0x0f;
+    if (ad->chs_only)
+        *bad = ((ch << 8 | cl) * heads + dh) * spt + sn - 1;
+    else if (ext) {
+        outb(ATA_CB_DC_HD15 | ATA_CB_DC_NIEN | 0x80, dc);   // HOB: the high bytes
+        *bad = inb(io + ATA_CB_SN) << 24 | ch << 16 | cl << 8 | sn;
+        outb(ATA_CB_DC_HD15 | ATA_CB_DC_NIEN, dc);
+    } else
+        *bad = dh << 24 | ch << 16 | cl << 8 | sn;
+    return inb(io + ATA_CB_ERR) | 0x100;
+}
+
+static const char *
+ata_error_name(int err)
+{
+    return err & 0x40 ? "uncorrectable" : err & 0x10 ? "not found (IDNF)" : err & 0x80 ? "marked bad"
+        : err & 0x01 ? "no address mark" : err & 0x04 ? "aborted" : "error";
+}
+
+static void
+scan_disk(int i)
+{
+    struct atadrive_s *ad = ide_select(i);
+    u32 total = IdeInfo[i].sectors, lba = 0, nbad = 0, bad, start = mt_seconds();
+    int err = 0, stop = 0;
+    scr_header("HDD SURFACE SCAN");
+    info_printf(3, "Disk     : %s %s, %dMB", IdeUnit[i], IdeInfo[i].model, total / 2048);
+    info_printf(10, "Bad sectors (the first %d):", SCAN_ROWS);
+    scr_printf(ROW_HELP, 2, AttrText, "ESC : Stop");
+    post_code(0xbe);
+    while (lba < total && !stop) {
+        int count = total - lba < 256 ? total - lba : 256;
+        err = ide_verify(ad, lba, count, &bad);
+        if (err < 0)
+            break;
+        if (err) {
+            if (bad < lba || bad >= lba + count)
+                bad = lba;
+            if (nbad < SCAN_ROWS)
+                info_printf(11 + nbad, "  sector %u: %s", bad, ata_error_name(err));
+            nbad++;
+            lba = bad + 1;
+        } else
+            lba += count;
+        u32 t = (mt_seconds() + 86400 - start) % 86400;
+        mt_bar(5, "Scanned ", lba, total);
+        info_printf(6, "Sector   : %u of %u", lba, total);
+        info_printf(7, "Time     : %d:%d%d:%d%d, %u KB/s   ", t / 3600, t / 600 % 6, t / 60 % 10, t % 60 / 10,
+                    t % 10, t ? lba / 2 / t : 0);
+        info_printf(8, "Bad      : %u", nbad);
+        stop = get_keystroke(0) == 0x01;
+    }
+    post_code(POST_SETUP);
+    if (err < 0)
+        scr_printf(20, 3, AttrSelect, "The drive stopped answering at sector %u: reboot before using it", lba);
+    else if (stop)
+        scr_printf(20, 3, AttrTitle, "Stopped (ESC) at sector %u", lba);
+    else
+        scr_printf(20, 3, nbad ? AttrSelect : AttrTitle, "Done: %u bad sectors", nbad);
+    scr_printf(ROW_HELP, 2, AttrText, "Press a key");
+    while (get_keystroke(1000) < 0)
         ;
+}
+
+static void
+surface_scan(void)
+{
+    int drive[4], n = 0, sel = 0;
+    for (int i = 0; i < 4; i++)
+        if (IdeInfo[i].present && !IdeInfo[i].atapi)
+            drive[n++] = i;
+    for (;;) {
+        scr_header("HDD SURFACE SCAN");
+        info_printf(3, n ? "Every sector read and checked by the drive (VERIFY), nothing transferred" : "No IDE hard disk");
+        for (int k = 0; k < n; k++)
+            scr_printf(5 + k, 3, k == sel ? AttrSelect : AttrText, "%s : %s, %dMB", IdeUnit[drive[k]],
+                       IdeInfo[drive[k]].model, IdeInfo[drive[k]].sectors / 2048);
+        scr_printf(ROW_HELP, 2, AttrText, "ESC : Back   \x18\x19 : Select disk   Enter : Scan it (ESC stops it)");
+        int key = get_keystroke(1000);
+        if (key == 0x01)
+            return;
+        if (key == 0x48 && sel > 0)
+            sel--;
+        if (key == 0x50 && sel < n - 1)
+            sel++;
+        if (key == 0x1c && n)
+            scan_disk(drive[sel]);
+    }
 }
 
 void
@@ -3628,7 +4764,7 @@ hd_list(void)
 {
     struct drive_s *drives[HD_MAX];
     const char *descs[HD_MAX];
-    int n = boot_hd_list(drives, descs, HD_MAX);
+    int n = boot_drive_list(0x02, drives, descs, HD_MAX);
     for (HdCount = 0; HdCount < n; HdCount++) {
         struct drive_s *drive = drives[HdCount];
         memset(&Hd[HdCount], 0, sizeof(Hd[0]));
@@ -3867,14 +5003,12 @@ bench_run(int (*page)(void))
 {
     if (!gfx_open()) {
         scr_open();
-        info_line(3, "These pages need a VGA (mode 12h)");
-        while (get_keystroke(1000) != 0x01)
-            ;
+        info_printf(3, "These pages need a VGA (mode 12h)");
+        wait_esc();
         return;
     }
     if (!page())                                // a page with its own keys took ESC already
-        while (get_keystroke(1000) != 0x01)
-            ;
+        wait_esc();
     scr_open();
 }
 
@@ -3914,8 +5048,6 @@ ports_str(char *out, int size, int first_lpt)
 void
 setup_post_summary(void)
 {
-    static const char * const unit[] = { "Pri. Master", "Pri. Slave ",
-                                         "Sec. Master", "Sec. Slave " };
     char rule[79], left[48], right[48], ports[32];
     int mhz, i;
     const char *name = cpu_short_name(&mhz);
@@ -3950,11 +5082,11 @@ setup_post_summary(void)
     for (i = 0; i < 4; i++) {
         u32 mb = IdeInfo[i].sectors / 2048;
         if (!IdeInfo[i].present)
-            printf(" %s Disk : None\n", unit[i]);
+            printf(" %s Disk : None\n", IdeUnitShort[i]);
         else if (IdeInfo[i].atapi)
-            printf(" %s Disk : CD-ROM, PIO %d  %s\n", unit[i], IdeInfo[i].pio, IdeInfo[i].model);
+            printf(" %s Disk : CD-ROM, PIO %d  %s\n", IdeUnitShort[i], IdeInfo[i].pio, IdeInfo[i].model);
         else
-            printf(" %s Disk : %d%s, PIO %d  %s\n", unit[i], mb >= 10000 ? mb / 1024 : mb,
+            printf(" %s Disk : %d%s, PIO %d  %s\n", IdeUnitShort[i], mb >= 10000 ? mb / 1024 : mb,
                    mb >= 10000 ? "GB" : "MB", IdeInfo[i].pio, IdeInfo[i].model);
     }
     printf("%s\n", rule);
@@ -3970,12 +5102,13 @@ setup_post_summary(void)
 #define MT_CHUNK    0x40000                 // bytes between screen updates and key checks
 #define MT_ERR_ROWS 5
 #define MT_ROW_ERR  16
-#define MT_TESTS    9
+#define MT_TESTS    10                      // 0-8: the default pass; 9: bit fade (key F)
+#define MT_FADE_S   300                     // bit fade: seconds each pattern is left alone
 
 typedef void (*mt_fn)(volatile u32 *p, volatile u32 *e);
 
 static struct { u32 start, end; } MtSeg[MT_SEGS];
-static int MtSegs, MtTest, MtPass, MtAbort, MtErrRows, MtDry;
+static int MtSegs, MtTest, MtPass, MtAbort, MtErrRows, MtDry, MtFirst, MtLast;   // MtAbort: 1 ESC, 2 F
 static u32 MtP1, MtInv, MtRot, MtOff, MtIter, MtRand, MtErrors, MtErrBits, MtTime;
 static u32 MtKB, MtTestKB[MT_TESTS], MtTestStart, MtPassKB;   // progress: KiB swept (MtDry: counted only)
 static struct { u32 addr, good, bad, count; int test; } MtErr[MT_ERR_ROWS];
@@ -3984,8 +5117,9 @@ static const char * const MtName[MT_TESTS] = {
     "Address test, walking ones", "Address test, own address", "Moving inversions, ones & zeros",
     "Moving inversions, 8 bit pattern", "Moving inversions, random pattern", "Block move, 80 moves",
     "Moving inversions, 32 bit pattern", "Random number sequence", "Modulo 20, random pattern",
+    "Bit fade test, 2 patterns, 5 min each",
 };
-static const u8 MtIters[MT_TESTS] = { 1, 1, 4, 2, 50, 80, 2, 30, 6 };   // halved in the first pass
+static const u8 MtIters[MT_TESTS] = { 1, 1, 4, 2, 50, 80, 2, 30, 6, 1 };   // halved in the first pass
 
 static inline u32
 rol32(u32 v, u32 n)
@@ -4051,12 +5185,10 @@ mt_tested(u32 addr)
 static void
 mt_bar(int row, const char *name, u32 done, u32 total)
 {
-    char line[80];
     int pct = total >= 100 ? done / (total / 100) : 0, i;
     if (pct > 100)
         pct = 100;
-    snprintf(line, sizeof(line), "%s : %s%s%d%%", name, pct < 100 ? " " : "", pct < 10 ? " " : "", pct);
-    scr_puts(row, 3, AttrText, line);
+    scr_printf(row, 3, AttrText, "%s : %s%s%d%%", name, pct < 100 ? " " : "", pct < 10 ? " " : "", pct);
     for (i = 0; i < 40; i++)
         scr_fill(row, 20 + i, 1, AttrText, i < pct * 40 / 100 ? 0xdb : 0xb0);
 }
@@ -4068,26 +5200,24 @@ mt_poll(u32 addr)
     char line[80];
     int i, t = (mt_seconds() + 86400 - MtTime) % 86400;
     mt_bar(11, "Pass    ", MtKB, MtPassKB);
-    if (MtTest < MT_TESTS)                  // MT_TESTS: the pass is complete
+    if (MtTest <= MtLast)                   // past it: the pass is complete
         mt_bar(12, "Test    ", MtKB - MtTestStart, MtTestKB[MtTest]);
-    snprintf(line, sizeof(line), "Pattern  : %08x   Address : %dK      ", MtP1, addr >> 10);
-    scr_puts(13, 3, AttrText, line);
-    snprintf(line, sizeof(line), "Pass     : %d", MtPass);
-    scr_puts(4, 42, AttrText, line);
+    scr_printf(13, 3, AttrText, "Pattern  : %08x   Address : %dK      ", MtP1, addr >> 10);
+    scr_printf(4, 42, AttrText, "Pass     : %d", MtPass);
     snprintf(line, sizeof(line), "Time     : %d:%d%d:%d%d", t / 3600, t / 600 % 6, t / 60 % 10,
              t % 60 / 10, t % 10);           // (%d has no width)
     scr_puts(5, 42, AttrText, line);
-    snprintf(line, sizeof(line), "Errors   : %d", MtErrors);
-    scr_puts(6, 42, MtErrors ? AttrValue : AttrText, line);
-    snprintf(line, sizeof(line), "Err-Bits : %08x", MtErrBits);
-    scr_puts(7, 42, AttrText, line);
+    scr_printf(6, 42, MtErrors ? AttrValue : AttrText, "Errors   : %d", MtErrors);
+    scr_printf(7, 42, AttrText, "Err-Bits : %08x", MtErrBits);
     for (i = 0; i < MtErrRows; i++) {
-        snprintf(line, sizeof(line), " %d   %08x  %08x  %08x  %08x  %d", MtErr[i].test, MtErr[i].addr,
-                 MtErr[i].good, MtErr[i].bad, MtErr[i].good ^ MtErr[i].bad, MtErr[i].count);
-        scr_puts(MT_ROW_ERR + i, 3, AttrValue, line);
+        scr_printf(MT_ROW_ERR + i, 3, AttrValue, " %d   %08x  %08x  %08x  %08x  %d", MtErr[i].test, MtErr[i].addr,
+                   MtErr[i].good, MtErr[i].bad, MtErr[i].good ^ MtErr[i].bad, MtErr[i].count);
     }
-    if (get_keystroke(0) == 0x01)
+    int key = get_keystroke(0);
+    if (key == 0x01)
         MtAbort = 1;
+    if (key == 0x21 && !MtFirst)            // F: bit fade passes instead
+        MtAbort = 2;
 }
 
 // fn on all tested RAM, MT_CHUNK bytes at a time, upwards or downwards (fn walks its chunk the same way).
@@ -4308,6 +5438,32 @@ mt_mod_check(volatile u32 *p, volatile u32 *e)
         mt_check(p, MtP1);
 }
 
+// Bit fade: the RAM left alone (only refreshed) for MT_FADE_S, the pattern written back from the caches before
+// and the caches emptied after, so that the check reads DRAM.
+static void
+mt_fade_wait(void)
+{
+    u32 start = mt_seconds(), t;
+    if (MtDry)
+        return;
+    wbinvd();
+    while (!MtAbort && (t = (mt_seconds() + 86400 - start) % 86400) < MT_FADE_S) {
+        mt_poll(0);
+        t = MT_FADE_S - t;
+        scr_printf(13, 3, AttrText, "Pattern  : %08x   Waiting : %d:%d%d, the RAM left alone      ", MtP1, t / 60,
+                   t % 60 / 10, t % 10);
+        msleep(200);
+    }
+    wbinvd();
+}
+
+static void
+mt_fade_check(volatile u32 *p, volatile u32 *e)
+{
+    for (; p < e; p++)
+        mt_check(p, MtP1);
+}
+
 static void
 mt_modtst(int off, u32 p1)
 {
@@ -4364,6 +5520,15 @@ mt_test(int test, int iter)
             }
         }
         break;
+    case 9:
+        for (i = 0; i < 2 && !MtAbort; i++) {
+            MtP1 = i ? ~0 : 0;
+            MtRot = 0;
+            mt_sweep(mt_inv_fill, 0);
+            mt_fade_wait();
+            mt_sweep(mt_fade_check, 0);
+        }
+        break;
     }
 }
 
@@ -4399,37 +5564,41 @@ mt_run(void)
         total += end - start;
     }
     scr_header("MEMORY TEST");
-    snprintf(line, sizeof(line), mhz ? "CPU      : %s %dMHz" : "CPU      : %s", name, mhz);
-    info_line(4, line);
-    snprintf(line, sizeof(line), "L1 Cache : %d MB/s", mt_speed(4));
-    info_line(5, line);
+    info_printf(4, mhz ? "CPU      : %s %dMHz" : "CPU      : %s", name, mhz);
+    info_printf(5, "L1 Cache : %d MB/s", mt_speed(4));
     if (l2)
         snprintf(line, sizeof(line), "L2 Cache : %dK, %d MB/s", l2, mt_speed(l2 / 2));
     else
         snprintf(line, sizeof(line), "L2 Cache : none");
-    info_line(6, line);
-    snprintf(line, sizeof(line), "Memory   : %dK, %d MB/s", 1024 + ext_mem_kb(), mt_speed(-1));
-    info_line(7, line);
+    info_printf(6, "%s", line);
+    info_printf(7, "Memory   : %dK, %d MB/s", 1024 + ext_mem_kb(), mt_speed(-1));
     if (MtSegs)
         snprintf(line, sizeof(line), "Testing  : %dK - %dK, %dK free", MtSeg[0].start >> 10,
                  MtSeg[MtSegs - 1].end >> 10, total >> 10);
-    info_line(8, MtSegs ? line : "Testing  : no free RAM");
-    info_line(MT_ROW_ERR - 1, "Tst  Address   Good      Bad       Err-Bits  Count");
-    scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
-    MtPass = MtAbort = MtErrRows = MtErrors = MtErrBits = 0;
+    info_printf(8, "%s", MtSegs ? line : "Testing  : no free RAM");
+    info_printf(MT_ROW_ERR - 1, "Tst  Address   Good      Bad       Err-Bits  Count");
+    scr_puts(ROW_HELP, 2, AttrText, "ESC : Back   F : Bit fade test (each pattern left alone 5 min)");
+    MtPass = MtAbort = MtErrRows = MtErrors = MtErrBits = MtFirst = 0;
+    MtLast = MT_TESTS - 2;
     MtRand = 0x2545f491;
     MtTime = mt_seconds();
-    while (MtSegs && !MtAbort) {
+    while (MtSegs && MtAbort != 1) {
+        if (MtAbort) {                      // F: from now on bit fade passes
+            MtAbort = MtPass = 0;
+            MtFirst = MtLast = MT_TESTS - 1;
+            scr_fill(22, 0, 80, AttrText, ' ');
+            scr_puts(ROW_HELP, 2, AttrText, "ESC : Back                                                      ");
+        }
         u32 rand = MtRand;
         MtDry = 1;                          // sizes of this pass's tests, for the progress bars
-        for (MtPassKB = MtTest = 0; MtTest < MT_TESTS; MtPassKB += MtTestKB[MtTest++]) {
+        for (MtPassKB = 0, MtTest = MtFirst; MtTest <= MtLast; MtPassKB += MtTestKB[MtTest++]) {
             MtKB = 0;
             mt_test(MtTest, MtPass ? MtIters[MtTest] : MtIters[MtTest] / 2);
             MtTestKB[MtTest] = MtKB;
         }
         MtDry = MtKB = 0;
         MtRand = rand;
-        for (MtTest = 0; MtTest < MT_TESTS && !MtAbort; MtTest++) {
+        for (MtTest = MtFirst; MtTest <= MtLast && !MtAbort; MtTest++) {
             snprintf(line, sizeof(line), "Test %d [%s]", MtTest, MtName[MtTest]);
             scr_fill(10, 3, 60, AttrText, ' ');
             scr_puts(10, 3, AttrTitle, line);
@@ -4437,13 +5606,13 @@ mt_run(void)
             mt_test(MtTest, MtPass ? MtIters[MtTest] : MtIters[MtTest] / 2);
         }
         if (MtAbort)
-            break;
+            continue;
         MtPass++;
         mt_poll(0);
         if (!MtErrors)
             scr_center(22, AttrTitle, "Pass complete, no errors, press Esc to exit");
     }
-    while (!MtSegs && get_keystroke(1000) != 0x01)
-        ;
+    if (!MtSegs)
+        wait_esc();
     post_code(POST_SETUP);
 }

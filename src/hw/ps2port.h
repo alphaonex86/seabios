@@ -65,5 +65,7 @@ void ps2_check_event(void);
 void ps2port_setup(void);
 extern int PS2KeyboardOK;
 void ps2_kbd_failure(char *buf, int size);
+void ps2_irq_step(int step);
+int ps2_kbd_line_test(void);
 
 #endif // ps2port.h

@@ -49,7 +49,7 @@ char pnp_string[] __aligned(2) VARFSEG = " $PnP";
 #endif
 #define ESCD_OFF  0xc000                        // flash 0x1c000: a 4 KiB parameter block
 #define ESCD_SIZE 0x1000
-#define ESCD_SIG  0x47464341                    // "ACFG"
+#define ESCD_SIG  0x47464341u                   // "ACFG"
 #define FL_HB     0x80                         // UM8881F 00:10.0
 #define FL_IBC    0x90                         // UM8886BF 00:12.0
 
@@ -702,7 +702,7 @@ handle_pnp(u16 *args, int prot)
     case 0x41:                                  // ESCD: minimum write size, size, NV storage base
         far_wr16(args[2], args[1], ESCD_SIZE);
         far_wr16(args[4], args[3], ESCD_SIZE);
-        far_wr16(args[6], args[5], PNP_FLASH_BASE);
+        far_wr16(args[6], args[5], (u16)PNP_FLASH_BASE);
         far_wr16(args[6], args[5] + 2, PNP_FLASH_BASE >> 16);
         return 0;
     case 0x42 ... 0x43:                         // ESCD read, write
