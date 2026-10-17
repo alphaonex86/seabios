@@ -29,7 +29,7 @@ copy_fseg_table(const char *name, void *pos, u32 size)
         warn_noalloc();
         return NULL;
     }
-    dprintf(1, "Copying %s from %p to %p\n", name, pos, newpos);
+    dprintf(3, "Copying %s from %p to %p\n", name, pos, newpos);
     memcpy(newpos, pos, size);
     return newpos;
 }
@@ -62,7 +62,7 @@ copy_mptable(void *pos)
     u32 length = p->length * 16;
     u16 mpclength = ((struct mptable_config_s *)p->physaddr)->length;
     if (length + mpclength > BUILD_MAX_MPTABLE_FSEG) {
-        dprintf(1, "Skipping MPTABLE copy due to large size (%d bytes)\n"
+        dprintf(3, "Skipping MPTABLE copy due to large size (%d bytes)\n"
                 , length + mpclength);
         return;
     }
@@ -74,7 +74,7 @@ copy_mptable(void *pos)
         warn_noalloc();
         return;
     }
-    dprintf(1, "Copying MPTABLE from %p/%x to %p\n", pos, p->physaddr, newpos);
+    dprintf(3, "Copying MPTABLE from %p/%x to %p\n", pos, p->physaddr, newpos);
     memcpy(newpos, pos, length);
     newpos->physaddr = (u32)newpos + length;
     newpos->checksum -= checksum(newpos, sizeof(*newpos));
@@ -155,7 +155,7 @@ find_acpi_table(u32 signature)
             struct acpi_table_header *tbl = (void*)(u32)xsdt->table_offset_entry[i];
             if (!tbl || tbl->signature != signature)
                 continue;
-            dprintf(1, "table(%x)=%p (via xsdt)\n", signature, tbl);
+            dprintf(3, "table(%x)=%p (via xsdt)\n", signature, tbl);
             return tbl;
         }
     }
@@ -167,7 +167,7 @@ find_acpi_table(u32 signature)
             struct acpi_table_header *tbl = (void*)rsdt->table_offset_entry[i];
             if (!tbl || tbl->signature != signature)
                 continue;
-            dprintf(1, "table(%x)=%p (via rsdt)\n", signature, tbl);
+            dprintf(3, "table(%x)=%p (via rsdt)\n", signature, tbl);
             return tbl;
         }
     }

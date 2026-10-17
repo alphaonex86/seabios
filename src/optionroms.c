@@ -477,7 +477,7 @@ optionrom_setup(void)
     u32 post_vga = rom_get_last();
     isa_roms_setup();
 
-    dprintf(1, "Scan for option roms\n");
+    dprintf(3, "Scan for option roms\n");
     u64 sources[(BUILD_BIOS_ADDR - BUILD_ROM_START) / OPTION_ROM_ALIGN];
     memset(sources, 0, sizeof(sources));
 
@@ -599,7 +599,7 @@ vgarom_setup(void)
     if (! CONFIG_OPTIONROMS)
         return;
 
-    dprintf(1, "Scan for VGA option rom\n");
+    dprintf(3, "Scan for VGA option rom\n");
 
     // Load some config settings that impact VGA.
     EnforceChecksum = romfile_loadint("etc/optionroms-checksum", 0);

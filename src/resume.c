@@ -4,6 +4,7 @@
 //
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 
+#include "biosvar.h" // GET_GLOBAL
 #include "bregs.h" // struct bregs
 #include "config.h" // CONFIG_*
 #include "farptr.h" // FLATPTR_TO_SEGOFF
