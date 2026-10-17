@@ -236,14 +236,14 @@ coreboot_preinit(void)
     if (cbref) {
         cbcon = (void*)(u32)cbref->cbmem_addr;
         debug_banner();
-        dprintf(1, "Found coreboot cbmem console @ %llx\n", cbref->cbmem_addr);
+        dprintf(3, "Found coreboot cbmem console @ %llx\n", cbref->cbmem_addr);
     }
 
     struct cb_mainboard *cbmb = find_cb_subtable(cbh, CB_TAG_MAINBOARD);
     if (cbmb) {
         CBvendor = &cbmb->strings[cbmb->vendor_idx];
         CBpart = &cbmb->strings[cbmb->part_idx];
-        dprintf(1, "Found mainboard %s %s\n", CBvendor, CBpart);
+        dprintf(3, "Found mainboard %s %s\n", CBvendor, CBpart);
     }
 
     return;

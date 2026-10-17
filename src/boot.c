@@ -174,7 +174,7 @@ loadBiosGeometry(void)
 static BootDeviceLCHS *
 boot_lchs_find(const char *glob)
 {
-    dprintf(1, "Searching bios-geometry for: %s\n", glob);
+    dprintf(3, "Searching bios-geometry for: %s\n", glob);
     int i;
     for (i = 0; i < BiosGeometryCount; i++)
         if (glob_prefix(glob, BiosGeometry[i].name))
@@ -287,7 +287,7 @@ loadBootOrder(void)
 static int
 find_prio(const char *glob)
 {
-    dprintf(1, "Searching bootorder for: %s\n", glob);
+    dprintf(3, "Searching bootorder for: %s\n", glob);
     int i;
     for (i = 0; i < BootorderCount; i++) {
 dprintf(3, "B1 %d %d\n", i, BootorderCount);
@@ -578,14 +578,14 @@ struct bootentry_s {
 };
 static struct hlist_head BootList VARVERIFY32INIT;
 
-// The hard disks (IPL_TYPE_HARDDISK, defined below) of the boot list and their descriptions: how many, up to max.
+// The drives of one IPL type (defined below) in the boot list and their descriptions: how many, up to max.
 int
-boot_hd_list(struct drive_s **drive, const char **desc, int max)
+boot_drive_list(int type, struct drive_s **drive, const char **desc, int max)
 {
     struct bootentry_s *pos;
     int n = 0;
     hlist_for_each_entry(pos, &BootList, node) {
-        if (pos->type == 0x02 && n < max) {
+        if (pos->type == type && n < max) {
             drive[n] = pos->drive;
             desc[n++] = pos->description;
         }

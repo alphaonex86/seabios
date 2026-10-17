@@ -441,6 +441,23 @@ floppy_drive_check(u8 floppyid)
     return ret || (param[0] & 0xd0) ? -1 : 0;   // ST0: abnormal end or equipment check
 }
 
+// BOARD TEST, IRQ 6 by a controller reset: step 0 holds it in reset with its IRQ line on, 1 releases it (it
+// interrupts), 2 reads its interrupt status for each drive (the line goes down). The drives recalibrate at
+// their next use.
+void
+floppy_reset_step(int step)
+{
+    u8 param[2];
+    if (step == 0)
+        floppy_dor_mask(FLOPPY_DOR_RESET, FLOPPY_DOR_IRQ);
+    else if (step == 1)
+        floppy_dor_mask(0, FLOPPY_DOR_RESET | FLOPPY_DOR_IRQ);
+    else
+        for (int i = 0; i < 4; i++)
+            floppy_pio(FC_CHECKIRQ, param);
+    SET_BDA(floppy_recalibration_status, GET_BDA(floppy_recalibration_status) & ~0x0f);
+}
+
 static int
 floppy_drive_specify(void)
 {

@@ -22,7 +22,7 @@
  ****************************************************************/
 
 static void
-__disk_ret(struct bregs *regs, u32 linecode, const char *fname)
+__disk_ret(struct bregs *regs, u32 linecode)
 {
     u8 code = linecode;
     if (regs->dl < EXTSTART_HD)
@@ -30,35 +30,35 @@ __disk_ret(struct bregs *regs, u32 linecode, const char *fname)
     else
         SET_BDA(disk_last_status, code);
     if (code)
-        __set_code_invalid(regs, linecode, fname);
+        __set_code_invalid(regs, linecode);
     else
         set_code_success(regs);
 }
 
 static void
-__disk_ret_unimplemented(struct bregs *regs, u32 linecode, const char *fname)
+__disk_ret_unimplemented(struct bregs *regs, u32 linecode)
 {
     u8 code = linecode;
     if (regs->dl < EXTSTART_HD)
         SET_BDA(floppy_last_status, code);
     else
         SET_BDA(disk_last_status, code);
-    __set_code_unimplemented(regs, linecode, fname);
+    __set_code_unimplemented(regs, linecode);
 }
 
 static void
-__disk_stub(struct bregs *regs, int lineno, const char *fname)
+__disk_stub(struct bregs *regs, int lineno)
 {
-    __warn_unimplemented(regs, lineno, fname);
-    __disk_ret(regs, DISK_RET_SUCCESS | (lineno << 8), fname);
+    __warn_unimplemented(regs, lineno);
+    __disk_ret(regs, DISK_RET_SUCCESS | (lineno << 8));
 }
 
 #define disk_ret(regs, code) \
-    __disk_ret((regs), (code) | (__LINE__ << 8), __func__)
+    __disk_ret((regs), (code) | (__LINE__ << 8))
 #define disk_ret_unimplemented(regs, code) \
-    __disk_ret_unimplemented((regs), (code) | (__LINE__ << 8), __func__)
+    __disk_ret_unimplemented((regs), (code) | (__LINE__ << 8))
 #define DISK_STUB(regs)                         \
-    __disk_stub((regs), __LINE__, __func__)
+    __disk_stub((regs), __LINE__)
 
 
 /****************************************************************

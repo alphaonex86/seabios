@@ -64,4 +64,27 @@ enum nb_setting {
 
 #define NB_CMOS_GET(read, i)  (((read)(NB_CMOS_BASE + (i) / 2) >> ((i) % 2 * 4)) & 0x0f)
 
+/* Chipset features: the register field the original BIOS programs for each setting value (coreboot applies them,
+   the setup shows the chip's); ibc: 0 host bridge UM8881F, 1 ISA bridge UM8886BF */
+struct nb_field {
+	unsigned char setting, ibc, reg, mask, count, value[4];
+};
+#define NB_TIMING_FIELDS \
+	{ NB_DRAM_READ_WS,      0, 0x51, 0xc0, 4, { 0x00, 0x40, 0x80, 0xc0 } },	/* 3..0 WS */ \
+	{ NB_DRAM_WRITE_WS,     0, 0x51, 0x30, 4, { 0x00, 0x10, 0x20, 0x30 } }, \
+	{ NB_L2_WS,             0, 0x50, 0x30, 4, { 0x00, 0x10, 0x20, 0x30 } }, \
+	{ NB_EDO,               0, 0x61, 0xc0, 2, { 0x00, 0xc0 } }, \
+	{ NB_HOST_PCI_CLOCK,    1, 0xa4, 0x03, 3, { 0x01, 0x02, 0x00 } },	/* 1:1, 1:2/3, 1:1/2 */
+#define NB_OPTION_FIELDS \
+	{ NB_HOST_PCI_POST_WS,  0, 0x52, 0x80, 2, { 0x00, 0x80 } },	/* 1 WS, 0 WS */ \
+	{ NB_HOST_PCI_BURST,    0, 0x53, 0x80, 2, { 0x00, 0x80 } }, \
+	{ NB_BURST_COPYBACK,    0, 0x53, 0x40, 2, { 0x00, 0x40 } }, \
+	{ NB_EARLY_CACHE_WRITE, 0, 0x5d, 0x80, 2, { 0x00, 0x80 } }, \
+	{ NB_SLOW_REFRESH,      0, 0x5d, 0x10, 2, { 0x00, 0x10 } }, \
+	{ NB_PCI_POSTED_WRITE,  1, 0x40, 0x04, 2, { 0x00, 0x04 } }, \
+	{ NB_DEVSEL,            1, 0x40, 0x03, 3, { 0x01, 0x00, 0x02 } },	/* slow, medium, fast */ \
+	{ NB_PCI_BUS_PARK,      1, 0x41, 0x04, 2, { 0x04, 0x00 } }, \
+	{ NB_PREEMPT_PCI,       1, 0x46, 0x10, 2, { 0x10, 0x00 } }, \
+	{ NB_KBC_CLOCK,         1, 0x56, 0x0c, 4, { 0x00, 0x04, 0x08, 0x0c } },	/* 7.16 MHz, PCICLK/4 /3 /2 */
+
 #endif

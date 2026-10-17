@@ -464,6 +464,34 @@ kbd_fail(int step, int got)
     return -1;
 }
 
+// BOARD TEST, IRQ 1: step 0 turns the keyboard off and its interrupt on, 1 leaves the controller's answer to
+// "read command byte" in its output buffer (it raises IRQ 1), 2 reads it and restores the command byte.
+void
+ps2_irq_step(int step)
+{
+    u8 ctr = GET_LOW(Ps2ctr), on = (ctr | I8042_CTR_KBDDIS | I8042_CTR_AUXDIS | I8042_CTR_KBDINT) & ~I8042_CTR_AUXINT;
+    if (step == 0) {
+        i8042_command(I8042_CMD_CTL_WCTR, &on);
+        i8042_flush();
+    } else if (step == 1) {
+        if (!i8042_wait_write())
+            outb((u8)I8042_CMD_CTL_RCTR, PORT_PS2_STATUS);
+    } else {
+        inb(PORT_PS2_DATA);
+        i8042_command(I8042_CMD_CTL_WCTR, &ctr);
+    }
+}
+
+// BOARD TEST: the controller's keyboard line test now, the keyboard off meanwhile: its answer, -1 for none.
+int
+ps2_kbd_line_test(void)
+{
+    u8 ctr = GET_LOW(Ps2ctr), off = (ctr | I8042_CTR_KBDDIS) & ~I8042_CTR_KBDINT, param[1];
+    int ret = i8042_command(I8042_CMD_CTL_WCTR, &off) || i8042_flush() || i8042_command(I8042_CMD_KBD_TEST, param);
+    i8042_command(I8042_CMD_CTL_WCTR, &ctr);
+    return ret ? -1 : param[0];
+}
+
 void
 ps2_kbd_failure(char *buf, int size)
 {
