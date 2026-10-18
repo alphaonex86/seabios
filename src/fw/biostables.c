@@ -17,6 +17,7 @@
 #include "std/smbios.h" // struct smbios_21_entry_point
 #include "string.h" // memcpy
 #include "util.h" // copy_table
+#include "bios_name.h" // BIOS_NAME
 #include "x86.h" // outb
 
 struct pir_header *PirAddr VARFSEG;
@@ -482,7 +483,6 @@ smbios_new_type_0(void *start,
     return end;
 }
 
-#define BIOS_NAME "SeaBIOS"
 #define BIOS_DATE "04/01/2014"
 
 /*
