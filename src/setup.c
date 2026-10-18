@@ -26,6 +26,7 @@
 #include "util.h" // setup_menu
 #include "x86.h" // cpuid
 #include "post_serial.h" // post_serial (after x86.h: inb, outb)
+#include "bios_name.h" // BIOS_NAME
 
 u8 Setting[NB_COUNT];
 static int SetupDefaulted, ChipsetFallback, PrevPostCode;   // POST warnings, see setup_post_warnings()
@@ -4718,7 +4719,7 @@ bench_cpu(void)
     snprintf(text, sizeof(text), "Memory      : %d KB", 1024 + ext_mem_kb());
     gfx_text(row++, 2, C_WHITE, text);
     gfx_text(row++, 2, C_WHITE, "Chipset     : UMC UM8881F + UM8886BF");
-    snprintf(text, sizeof(text), "BIOS        : mb-8433UUD %s", RELEASE_DATE);
+    snprintf(text, sizeof(text), "BIOS        : " BIOS_NAME " %s", RELEASE_DATE);
     gfx_text(row++, 2, C_WHITE, text);
     if (known && mhz) {                         // references: this CPU's own speed per MHz
         for (refs = 0; refs < ARRAY_SIZE(RefMhz); refs++) {
