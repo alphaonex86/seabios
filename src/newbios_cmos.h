@@ -1,5 +1,5 @@
 /*
- * newBIOS CMOS layout, shared by SeaBIOS (setup utility, POST options) and coreboot (chipset options).
+ * mb-8433UUD CMOS layout, shared by SeaBIOS (setup utility, POST options) and coreboot (chipset options).
  * build.sh copies this file into both trees. One nibble per setting: index i is in byte
  * NB_CMOS_BASE + i / 2, low nibble for even i.
  */

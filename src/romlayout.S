@@ -9,7 +9,7 @@
 // assembled as 16-bit code (.code16, gcc -m16) and linked with the 16-bit C
 // code into the 64 KiB BIOS segment F000 (BUILD_BIOS_ADDR = 0xF0000), so
 // symbol values here are offsets inside that segment; a 32-bit flat address
-// is BUILD_BIOS_ADDR + symbol. In newBIOS, coreboot loads the SeaBIOS ELF
+// is BUILD_BIOS_ADDR + symbol. In mb-8433UUD, coreboot loads the SeaBIOS ELF
 // into the RAM at 0xE82C0-0xFFFFF (the shadow RAM of the BIOS area) and
 // enters entry_elf in 32-bit mode.
 // The rest of this file is the runtime glue: real-mode interrupt entry
@@ -20,7 +20,7 @@
 // call32()) and 32-bit segmented mode (APM/PCI BIOS for protected-mode
 // callers).
 // DECLFUNC sections that nothing references are dropped by layoutrom.py;
-// with the newBIOS configuration (out-rel) entry_smi, entry_smp, entry_csm,
+// with the mb-8433UUD configuration (out-rel) entry_smi, entry_smp, entry_csm,
 // __csm_return, entry_sercon and irqentry_arg_extrastack are not in the ROM.
 
 #include "asm-offsets.h" // BREGS_*
@@ -236,7 +236,7 @@ __farcall16:
  ****************************************************************/
 
 // Entry point for QEMU smi interrupts.
-// (QEMU only: not in the newBIOS ROM, nor is entry_smp below)
+// (QEMU only: not in the mb-8433UUD ROM, nor is entry_smp below)
         DECLFUNC entry_smi
 entry_smi:
         // Transition to 32bit mode.
@@ -439,7 +439,7 @@ entry_bios32:
 // jumps to its ELF entry (entry_elf) in 32-bit flat protected mode with
 // the coreboot GDT. Replace coreboot IDT/GDT/segments/stack with the
 // SeaBIOS ones and continue in handle_post() (post.c, 32-bit flat C).
-// EAX/EBX are kept for multiboot (not enabled in newBIOS).
+// EAX/EBX are kept for multiboot (not enabled in mb-8433UUD).
         DECLFUNC entry_elf
         .code32
 entry_elf:
@@ -702,7 +702,7 @@ entry_18:
         .endm
 
         // F000:E05B - POST entry, reached from reset_vector below. In
-        // newBIOS the first POST is entered through entry_elf instead, so
+        // mb-8433UUD the first POST is entered through entry_elf instead, so
         // here HaveRunPost is normally set (a restart after POST) and the
         // resume/reboot path is taken.
         ORG 0xe05b
@@ -765,7 +765,7 @@ entry_19_official:
 
         // F000:F045 and F000:F065 - INT 10h, video: only an iret. The
         // video BIOS of the graphics card (option ROM) installs the real
-        // INT 10h handler (newBIOS has no built-in VGA BIOS).
+        // INT 10h handler (mb-8433UUD has no built-in VGA BIOS).
         ORG 0xf045
 entry_10_0x0f:
         // XXX - INT 10 Functions 0-Fh Entry Point
@@ -819,7 +819,7 @@ entry_iret_official:
         ORG 0xff54
         IRQ_ENTRY_ARG 05
 
-        // F000:FFF0 = physical 0xFFFF0. In newBIOS the hardware reset
+        // F000:FFF0 = physical 0xFFFF0. In mb-8433UUD the hardware reset
         // vector is coreboot (0xFFFFFFF0 in flash, reset16.S); this copy
         // in shadow RAM is reached by a jump to F000:FFF0 / FFFF:0000 (warm
         // reboot by software) or from coreboot entry16.S after a CPU-only
