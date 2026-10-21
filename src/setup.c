@@ -396,7 +396,10 @@ setup_post_warnings(void)
             errors |= post_error(ERR_DISK, "Hard disk(s) fail (80)");
             break;
         }
-    if (!PS2KeyboardOK && !usb_kbd_active()) {
+    if (!PS2KeyboardOK)
+        wait_threads();                     // the PS/2 retries and the USB keyboard may still be in their threads
+    int no_keyboard = !PS2KeyboardOK && !usb_kbd_active();
+    if (no_keyboard) {
         char why[48], line[80];
         ps2_kbd_failure(why, sizeof(why));
         snprintf(line, sizeof(line), "Keyboard error or no keyboard present%s", why);
@@ -414,9 +417,9 @@ setup_post_warnings(void)
         printf("The previous POST did not finish, its last POST code: %02X\n", PrevPostCode);
     if (ChipsetFallback)
         printf("Chipset setup values not used after %d unfinished POSTs.\n", ChipsetFallback);
-    if (!(errors & halts[Setting[NB_HALT_ON]])) {
+    if (!(errors & halts[Setting[NB_HALT_ON]]) || no_keyboard) {   // no keyboard: nobody could press F1
         if (errors) {
-            printf("WARNING: POST errors above, boot continues (Halt On)\n");
+            printf("WARNING: POST errors above, boot continues (%s)\n", no_keyboard ? "no keyboard" : "Halt On");
             PostWarned = 1;   // the boot prompt then lasts 3 s, time to read them (not 3 s more before it)
         }
         return;

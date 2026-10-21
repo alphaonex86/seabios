@@ -273,12 +273,13 @@ configure_ehci(void *data)
 
     // Set default of high speed for root hub.
     writel(&cntl->regs->configflag, 1);
-    PendingEHCI--;
 
-    // Find devices
+    // Find devices. The companion controllers wait until then: a low or full speed device is handed to them
+    // during this scan, and theirs could end before (a USB keyboard missed after a warm boot).
     post_code(POST_USB_EHCI_PORTS);
     int count = check_ehci_ports(cntl);
     post_code(POST_USB_EHCI_DONE);
+    PendingEHCI--;
     ehci_free_pipes(cntl);
     if (count)
         // Success
