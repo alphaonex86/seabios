@@ -24,34 +24,42 @@
 
 #define I8042_BUFFER_SIZE       16
 
+// Without a keyboard the board's 8042 hangs once a byte was sent to it (its input buffer stays full). After one
+// timeout every wait fails at once while that lasts: each one took 500 ms with interrupts off (INT 16h, reboot).
+u8 KbcHung VARLOW;
+
+static int
+i8042_wait(u8 ready_mask, u8 ready_value)
+{
+    int i;
+    for (i=0; i<I8042_CTL_TIMEOUT; i++) {
+        u8 status = inb(PORT_PS2_STATUS);
+        if ((status & ready_mask) == ready_value) {
+            if (ready_mask == I8042_STR_IBF)
+                SET_LOW(KbcHung, 0);
+            return 0;
+        }
+        if (GET_LOW(KbcHung))
+            return -1;
+        udelay(50);
+    }
+    SET_LOW(KbcHung, 1);
+    warn_timeout();
+    return -1;
+}
+
 static int
 i8042_wait_read(void)
 {
     dprintf(7, "i8042_wait_read\n");
-    int i;
-    for (i=0; i<I8042_CTL_TIMEOUT; i++) {
-        u8 status = inb(PORT_PS2_STATUS);
-        if (status & I8042_STR_OBF)
-            return 0;
-        udelay(50);
-    }
-    warn_timeout();
-    return -1;
+    return i8042_wait(I8042_STR_OBF, I8042_STR_OBF);
 }
 
 static int
 i8042_wait_write(void)
 {
     dprintf(7, "i8042_wait_write\n");
-    int i;
-    for (i=0; i<I8042_CTL_TIMEOUT; i++) {
-        u8 status = inb(PORT_PS2_STATUS);
-        if (! (status & I8042_STR_IBF))
-            return 0;
-        udelay(50);
-    }
-    warn_timeout();
-    return -1;
+    return i8042_wait(I8042_STR_IBF, 0);
 }
 
 static int
