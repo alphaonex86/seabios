@@ -233,10 +233,9 @@ set_leds(void)
     if (shift_flags == led_flags)
         return;
 
-    int ret = kbd_command(ATKBD_CMD_SETLEDS, &shift_flags);
-    if (ret)
-        // Error
-        return;
+    // Not retried on failure: without a keyboard the board's 8042 hangs, and each try then takes 500 ms with
+    // interrupts off on every INT 16h call (LILO's countdown froze).
+    kbd_command(ATKBD_CMD_SETLEDS, &shift_flags);
     kbd_led = (kbd_led & ~0x07) | shift_flags;
     SET_BDA(kbd_led, kbd_led);
 }
