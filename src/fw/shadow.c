@@ -111,58 +111,6 @@ make_bios_readonly_intel(u16 bdf, u32 pam0)
     pci_config_writel(bdf, ALIGN_DOWN(pam0, 4) + 4, pamdata.data32[1]);
 }
 
-///////////////////////////////
-
-/////// finali
-
-//finali config access (for shadow write enable)
-#define PORT_INDEX	0x22
-#define PORT_DATA	0x23
-
-static void
-make_bios_writable_finali(void)
-{
-	dprintf(3, "enabling shadow ram\n");
-
-	//TODO shadow regions? all?
-	//TODO pc2005, this is only for ALI
-
-	//unlock chipset
-	outb(0x03, PORT_INDEX);
-	outb(0xc5, PORT_DATA);
-
-	//enable write
-	outb(0x14, PORT_INDEX);
-	outb(inb(PORT_DATA) | 0x20, PORT_DATA);
-
-	//lock chipset
-	outb(0x03, PORT_INDEX);
-	outb(0x0, PORT_DATA);
-}
-
-static void
-make_bios_readonly_finali(void)
-{
-    // Flush any pending writes before locking memory.
-	//TODO WT-only 486
-	wbinvd();
-
-	dprintf(3, "locking shadow ram on FinALI\n");
-
-	//unlock chipset
-	outb(0x03, PORT_INDEX);
-	outb(0xc5, PORT_DATA);
-
-	//disable write
-	outb(0x14, PORT_INDEX);
-	outb(inb(PORT_DATA) & ~0x20, PORT_DATA);
-
-	//lock chipset
-	outb(0x03, PORT_INDEX);
-	outb(0x0, PORT_DATA);
-}
-
-
 //UMC HB4
 
 static void
@@ -236,6 +184,8 @@ make_bios_writable(void)
         make_bios_writable_umc();
         return;
     }
+    if (!CONFIG_QEMU || runningOnXen())
+        return;
 
     // At this point, statically allocated variables can't be written,
     // so do this search manually.
@@ -272,6 +222,8 @@ make_bios_readonly(void)
             make_bios_readonly_umc();
         return;
     }
+    if (!CONFIG_QEMU || runningOnXen())
+        return;
 
     if (ShadowBDF < 0) {
         dprintf(1, "Unable to lock ram - bridge not found\n");
