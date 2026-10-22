@@ -3406,17 +3406,19 @@ fpu_present(void)
     return sw == 0;
 }
 
-// IRQ 13 by FERR#: a divide by zero with that exception unmasked and CR0.NE off (DOS-style FPU errors).
-// No waiting FPU instruction runs while it is pending: the 486 would wait for the interrupt.
+// IRQ 13 by FERR#: a store from an empty register (stack fault, an invalid operation) with that exception unmasked
+// and CR0.NE off (DOS-style FPU errors). An exception on a store asserts FERR# at once on the 486 and the Pentium;
+// one in basic arithmetic (FDIV) only at the next waiting FPU instruction (Intel486 databook 9.2.15.1), which would
+// wait for the interrupt. No waiting FPU instruction runs while it is pending.
 static void
 irq_fpu(void)
 {
-    static const u16 cw = 0x037b;
-    u32 cr0 = cr0_read();
+    static const u16 cw = 0x037e;
+    u32 cr0 = cr0_read(), unused;
     cr0_write(cr0 & ~CR0_NE);
     asm volatile("fninit");
     irq_step(13, 0);
-    asm volatile("fldcw %0; fldz; fld1; fdiv %%st(1), %%st" : : "m"(cw));
+    asm volatile("fldcw %1; fsts %0" : "=m"(unused) : "m"(cw));
     irq_step(13, 1);
     outb(0, 0xf0);                              // the chipset's FERR# latch cleared
     asm volatile("fnclex");
