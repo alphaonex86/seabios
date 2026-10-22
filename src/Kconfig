@@ -94,6 +94,60 @@ endchoice
             Setup default of Halt On, also used when the CMOS is lost (dead battery).
             1 boots a machine without keyboard through POST errors.
 
+menu "Setup utility tools"
+    depends on SETUP_MENU
+    config NEWBIOS_TOOL_INFO_CPU
+        bool "CPU, CACHE AND MEMORY page"
+        default y
+    config NEWBIOS_TOOL_INFO_PCI
+        bool "PCI DEVICES page"
+        default y
+    config NEWBIOS_TOOL_INFO_USB
+        bool "USB DEVICES page"
+        default y
+        help
+            Also the list of USB controllers and devices kept at POST for it.
+    config NEWBIOS_TOOL_INFO_ISA
+        bool "ISA RESOURCES AND IRQ MAP page"
+        default y
+    config NEWBIOS_TOOL_INFO_IDE
+        bool "IDE DRIVES page"
+        default y
+    config NEWBIOS_TOOL_CHIPSET_REGS
+        depends on NEWBIOS_CHIPSET_UMC
+        bool "CHIPSET REGISTERS page"
+        default y
+    config NEWBIOS_TOOL_BENCH_MEMORY
+        bool "MEMORY SPEED benchmark (chart by block size)"
+        default y
+    config NEWBIOS_TOOL_BENCH_CPU
+        bool "CPU BENCHMARK"
+        default y
+    config NEWBIOS_TOOL_BENCH_DISK
+        bool "HARD DISK BENCHMARK (seek times, read speed across the disk)"
+        default y
+    config NEWBIOS_TOOL_BENCH_DISK_SPEED
+        bool "HARD DISK SPEED benchmark (linear read speed of each disk)"
+        default y
+    config NEWBIOS_TOOL_BOARD_TEST
+        bool "BOARD TEST"
+        default y
+    config NEWBIOS_TOOL_MEMTEST
+        bool "MEMORY TEST (memtest86+ 4.20 tests)"
+        default y
+    config NEWBIOS_TOOL_CACHE_TEST
+        depends on NEWBIOS_CHIPSET_UMC
+        bool "CACHE TEST (L2 init with each write policy, timing and tag width)"
+        default y
+    config NEWBIOS_TOOL_L2_SRAM_TEST
+        depends on NEWBIOS_CHIPSET_UMC
+        bool "L2 SRAM TEST"
+        default y
+    config NEWBIOS_TOOL_SURFACE_SCAN
+        bool "HDD SURFACE SCAN"
+        default y
+endmenu
+
 choice
     prompt "Board"
     default NEWBIOS_BOARD_MB8433
