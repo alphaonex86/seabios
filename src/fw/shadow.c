@@ -177,11 +177,11 @@ make_bios_writable_umc(void)
 	pci_config_writeb(bdf, 0x55, val);
 }
 
-// Route reads of the 16 KiB block at addr (C8000-DFFFF) to the ISA bus or to shadow RAM.
+// Route reads of the 16 KiB block at addr (C8000-DFFFF) to the ISA bus or to shadow RAM (UMC only).
 void
 umc_isa_block(u32 addr, int isa)
 {
-	if (addr < 0xc8000 || addr >= 0xe0000)
+	if (!CONFIG_NEWBIOS_CHIPSET_UMC || addr < 0xc8000 || addr >= 0xe0000)
 		return;
 	const u16 bdf = pci_to_bdf(0, 0x10, 0);
 	const u8 bit = 1 << (2 + (addr - 0xc8000) / 0x4000);
@@ -193,10 +193,12 @@ umc_isa_block(u32 addr, int isa)
 
 static void make_bios_readonly_umc(void);
 
-// Send shadow-area writes to the ISA bus (RAM on ISA ROM cards) or to shadow RAM.
+// Send shadow-area writes to the ISA bus (RAM on ISA ROM cards) or to shadow RAM (UMC only).
 void
 umc_isa_writes(int isa)
 {
+	if (!CONFIG_NEWBIOS_CHIPSET_UMC)
+		return;
 	if (isa)
 		make_bios_readonly_umc();
 	else
@@ -230,11 +232,10 @@ static int ShadowBDF = -1;
 void
 make_bios_writable(void)
 {
-	//pc2005
-	//TODO hack for finali or UMC
-	// make_bios_writable_finali();
-	make_bios_writable_umc();
-	return;
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        make_bios_writable_umc();
+        return;
+    }
 
     // At this point, statically allocated variables can't be written,
     // so do this search manually.
@@ -264,36 +265,13 @@ make_bios_writable(void)
 void
 make_bios_readonly(void)
 {
-    //pc2005
-    //TODO hack for finali or UMC
     dprintf(3, "make_bios_readonly\n");
-
-    //stack and RW variables in upper memory, needs to be writeable
-    // if (CONFIG_WRITABLE_UPPERMEMORY)
-    if (! CONFIG_MALLOC_UPPERMEMORY) {
-        dprintf(3, "TODO UMC\n");
-        make_bios_readonly_umc();
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        // stack and RW variables in upper memory need it writable
+        if (!CONFIG_MALLOC_UPPERMEMORY)
+            make_bios_readonly_umc();
+        return;
     }
-
-    //TODO test
-    return;
-    // make_bios_readonly_finali();
-
-    u16 bdf;
-    u8 val;
-
-    // bdf = pci_to_bdf(0, 0x10, 0);
-    // val = pci_config_readb(bdf, 0x54);
-    // val |= 0xff;  //all shadow
-    // pci_config_writeb(bdf, 0x54, val);
-
-    bdf = pci_to_bdf(0, 0x10, 0);
-    val = pci_config_readb(bdf, 0x51);
-    val &= ~4;  //a-b write merge
-    pci_config_writeb(bdf, 0x51, val);
-
-
-	return;
 
     if (ShadowBDF < 0) {
         dprintf(1, "Unable to lock ram - bridge not found\n");
