@@ -652,20 +652,20 @@ vgarom_setup(void)
     if (!have_vga) {
         dprintf(3, " check ISA VGA\n");
 
-#if 1   //UMC
-        //set from RAM shadow to ROM
-        const u16 bdf = pci_to_bdf(0, 0x10, 0);
+        if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+            //set from RAM shadow to ROM
+            const u16 bdf = pci_to_bdf(0, 0x10, 0);
 
-        u8 val = pci_config_readb(bdf, 0x54);
-        val &= ~2;  //C_0000 - C_7FFF
-        val &= ~4;  //C_8000 - C_BFFF
-        val &= ~8;  //C_C000 - C_FFFF
-        pci_config_writeb(bdf, 0x54, val);
+            u8 val = pci_config_readb(bdf, 0x54);
+            val &= ~2;  //C_0000 - C_7FFF
+            val &= ~4;  //C_8000 - C_BFFF
+            val &= ~8;  //C_C000 - C_FFFF
+            pci_config_writeb(bdf, 0x54, val);
 
-        //TODO on WT-only 486
-        wbinvd();
-        // asm volatile("invd": : :"memory");
-#endif
+            //TODO on WT-only 486
+            wbinvd();
+            // asm volatile("invd": : :"memory");
+        }
 
         struct rom_header *rom = (struct rom_header *) 0xc0000;
 

@@ -479,8 +479,12 @@ static const u8 BoardDevs[] = {
     0x0c, 0x04, 11, 0x80, 0, 13, 0xff, 0xff, 1, IO(0xf0, 16),                             // math coprocessor
     0x08, 0x00, 4, 1, 0, 0xff, 0xff, 0xff, 1, IO(0x61, 1),                                // speaker
     0x0a, 0x03, 6, 0, 0, 0xff, 0xff, 0xff, 1, IO(0xcf8, 8),                               // PCI bus
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     0x0c, 0x02, 8, 0x80, 0, 0xff, 0xff, 0xff, 4, IO(0x80, 1), IO(0x92, 1), IO(0x108, 2), IO(0x4d0, 2),
                                                 // motherboard: POST code, port 92h, super I/O index, ELCR
+#else
+    0x0c, 0x02, 8, 0x80, 0, 0xff, 0xff, 0xff, 3, IO(0x80, 1), IO(0x92, 1), IO(0x4d0, 2),
+#endif
     0x07, 0x00, 1, 2, 0, 6, 2, 0, 2, IO(0x3f2, 4), IO(0x3f7, 1),                          // floppy controller
     0x06, 0x00, 1, 1, 0, 14, 0xff, 1, 2, IO(0x1f0, 8), IO(0x3f6, 1),                      // IDE
     0x06, 0x00, 1, 1, 0, 15, 0xff, 2, 2, IO(0x170, 8), IO(0x376, 1),
@@ -616,22 +620,24 @@ pnp_isa_ldev(int csn, const u8 *id, const u16 *io, const u8 *iolen, const u8 *ir
 void
 pnp_finish(int csns, u16 readport, u8 board)
 {
-    u16 size;
     if (!CONFIG_PNPBIOS)
         return;
     PnpCsns = csns;
     PnpReadPort = csns ? readport : 0;
-    FlashChip = fl_detect();
+    if (CONFIG_NEWBIOS_ESCD_FLASH)
+        FlashChip = fl_detect();
     if (!escd_start())
         return;
     card_end();
     escd_board(board);
-    size = escd_check(0);
-    *(u16 *)Escd = EscdLen + 2;
-    put16(escd_sum(0, 0, EscdLen + 2));
-    if (size != EscdLen || !escd_same(0, 0, 0, 0, size)) {
-        u16 ret = escd_write(0, 0, 0, EscdLen);
-        dprintf(1, "ESCD written: %x (flash chip %d)\n", ret, FlashChip);
+    if (CONFIG_NEWBIOS_ESCD_FLASH) {
+        u16 size = escd_check(0);
+        *(u16 *)Escd = EscdLen + 2;
+        put16(escd_sum(0, 0, EscdLen + 2));
+        if (size != EscdLen || !escd_same(0, 0, 0, 0, size)) {
+            u16 ret = escd_write(0, 0, 0, EscdLen);
+            dprintf(1, "ESCD written: %x (flash chip %d)\n", ret, FlashChip);
+        }
     }
     free(Escd);
     Escd = NULL;
@@ -690,7 +696,7 @@ handle_pnp(u16 *args, int prot)
     case 0x03 ... 0x08:                         // events, docking, statically allocated devices
         return FUNCTION_NOT_SUPPORTED;
     case 0x09 ... 0x0a:
-        return PNP_USE_ESCD_SUPPORT;
+        return CONFIG_NEWBIOS_ESCD_FLASH ? PNP_USE_ESCD_SUPPORT : FUNCTION_NOT_SUPPORTED;
     case 0x0b:                                  // APM ID table: empty
         far_wr16(args[2], args[1], 0);
         return 0;
@@ -700,12 +706,16 @@ handle_pnp(u16 *args, int prot)
         far_wr16(args[2], args[1] + 4, 0);
         return 0;
     case 0x41:                                  // ESCD: minimum write size, size, NV storage base
+        if (!CONFIG_NEWBIOS_ESCD_FLASH)
+            return FUNCTION_NOT_SUPPORTED;
         far_wr16(args[2], args[1], ESCD_SIZE);
         far_wr16(args[4], args[3], ESCD_SIZE);
         far_wr16(args[6], args[5], (u16)PNP_FLASH_BASE);
         far_wr16(args[6], args[5] + 2, PNP_FLASH_BASE >> 16);
         return 0;
     case 0x42 ... 0x43:                         // ESCD read, write
+        if (!CONFIG_NEWBIOS_ESCD_FLASH)
+            return FUNCTION_NOT_SUPPORTED;
         if (!args[2])
             return PNP_BAD_PARAMETER;
         if (prot)

@@ -241,8 +241,10 @@ maininit(void)
     if (CONFIG_SETUP_MENU) {
         post_code(POST_MEMTEST);
         setup_memtest();
-        setup_l2_cache();
-        setup_l2_post_line();
+        if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+            setup_l2_cache();
+            setup_l2_post_line();
+        }
         post_code(POST_OPTIONROMS);
         setup_isapnp();
         setup_pnp();
