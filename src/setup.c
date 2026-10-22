@@ -48,6 +48,16 @@ static const u8 Defaults[NB_COUNT] = {
 #endif
 };
 
+// Code shared by several setup tools (CONFIG_NEWBIOS_TOOL_*)
+#define TOOL_SPEED_POINTS (CONFIG_NEWBIOS_TOOL_MEMTEST || CONFIG_NEWBIOS_TOOL_BENCH_MEMORY)
+#define TOOL_READ_SPEED (CONFIG_NEWBIOS_TOOL_MEMTEST || CONFIG_NEWBIOS_TOOL_CACHE_TEST)
+#define TOOL_MEM_SPEED (TOOL_READ_SPEED || CONFIG_NEWBIOS_TOOL_BENCH_MEMORY)
+#define TOOL_L2_RESTART (CONFIG_NEWBIOS_TOOL_CACHE_TEST || CONFIG_NEWBIOS_TOOL_L2_SRAM_TEST)
+#define TOOL_HD_BENCH (CONFIG_NEWBIOS_TOOL_BENCH_DISK || CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED)
+#define TOOL_GFX (CONFIG_NEWBIOS_TOOL_BENCH_MEMORY || CONFIG_NEWBIOS_TOOL_BENCH_CPU || TOOL_HD_BENCH)
+#define TOOL_IDE_IO (CONFIG_NEWBIOS_TOOL_BOARD_TEST || CONFIG_NEWBIOS_TOOL_SURFACE_SCAN)
+#define TOOL_PROGRESS (CONFIG_NEWBIOS_TOOL_MEMTEST || CONFIG_NEWBIOS_TOOL_SURFACE_SCAN)
+
 #define SIO_INDEX 0x108
 #define SIO_DATA  0x109
 #define HB_BDF    pci_to_bdf(0, 0x10, 0)
@@ -1289,6 +1299,7 @@ cpu_mhz(void)
 
 // Core/bus clock ratio from the CPU (as coreboot's newbios.c, whose timings follow it): the multiplier pins are not
 // readable. Am5x86: 4x when only 4x gives a standard bus (133 = 4 x 33), else 3x; DX2 above 85 MHz are DX4s.
+#if CONFIG_NEWBIOS_TOOL_INFO_CPU
 static int
 standard_bus(u32 mhz, u32 m)
 {
@@ -1312,6 +1323,7 @@ cpu_multiplier(u32 mhz, u32 fms, int have_cpuid)
     }
     return 1;
 }
+#endif
 
 // What setup_l2_cache found, for the CPU page (the reason when the L2 stays off).
 enum { L2_NOT_RUN, L2_NONE, L2_SETUP_OFF, L2_RAM_SMALL, L2_HUNG, L2_CRASHED, L2_TAG0, L2_TAGMIX, L2_TAGMAX, L2_NOCACHE, L2_OK };
@@ -1332,6 +1344,7 @@ static const char * const L2StepNames[] = {
 };
 static u8 L2HungStep;   // the step the previous POST's L2 init stopped at
 
+#if CONFIG_NEWBIOS_TOOL_INFO_CPU
 // SIMM sockets as coreboot set the DRAM regions (52h, 53h): region L at 0 and U above it each take the pair
 // SIMM1-2 or SIMM3-4 (52h bit 3: 3-4 form L), 1 << n MB, on one SIMM of the pair (53h bit 4/5: the second) or both
 static void
@@ -1440,7 +1453,9 @@ info_cpu(void)
     info_printf(row++, "Chipset        : UMC UM8881F rev %x, UM8886BF rev %x, UM8663BF",
                 pci_config_readb(HB_BDF, PCI_REVISION_ID), pci_config_readb(IBC_BDF, PCI_REVISION_ID));
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_INFO_PCI
 static const char *
 pci_vendor(u16 v)
 {
@@ -1458,6 +1473,7 @@ pci_vendor(u16 v)
             return t[i].name;
     return "";
 }
+#endif
 
 static const char *
 pci_class_name(u16 c)
@@ -1476,6 +1492,7 @@ pci_class_name(u16 c)
     return "Other";
 }
 
+#if CONFIG_NEWBIOS_TOOL_INFO_PCI
 static void
 info_pci(void)
 {
@@ -1500,6 +1517,7 @@ info_pci(void)
         row++;
     }
 }
+#endif
 
 static const char *PnpIrq[16];               // IRQs given to ISA PnP cards
 static char PnpCard[4][48];                  // what the POST configured, per card
@@ -1545,6 +1563,7 @@ irq_owners(const char *owner[16])
             owner[i] = PnpIrq[i];
 }
 
+#if CONFIG_NEWBIOS_TOOL_INFO_USB
 // USB tree: each level one more space of indentation.
 static int
 info_usb_level(int parent, int depth, int row)
@@ -1586,7 +1605,9 @@ info_usb(void)
     if (info_usb_level(-1, 0, 5) == 5)
         info_printf(5, "none");
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_INFO_ISA
 static void
 info_isa(void)
 {
@@ -1613,7 +1634,9 @@ info_isa(void)
         scr_printf(row + (i & 7), 3 + (i >> 3) * 38, AttrText, "IRQ %d : %s", i, owner[i][0] ? owner[i] : "free");
     }
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_INFO_IDE
 static void
 info_ide(void)
 {
@@ -1638,8 +1661,9 @@ info_ide(void)
         info_printf(row + 1, "%s", line);
     }
 }
+#endif
 
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if CONFIG_NEWBIOS_TOOL_CHIPSET_REGS
 static void
 info_regs(const char *name, u16 bdf, int first, int rows, int row)
 {
@@ -1690,12 +1714,6 @@ info_chipset(void)
     info_printf(20, "UM8663BF super I/O   C0: %02X  C1: %02X", c0, c1);
 }
 #endif
-
-static void info_bench_memory(void);
-static void info_bench_cpu(void);
-static void info_bench_disk(void);
-static void info_bench_disk_bars(void);
-static void mt_run(void);
 
 /****************************************************************
  * ISA Plug and Play cards: isolation, resources and activation at POST, like the original BIOS
@@ -2070,12 +2088,40 @@ setup_boot_password(void)
  * Main menu
  ****************************************************************/
 
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#define TOOLS_INFO (CONFIG_NEWBIOS_TOOL_INFO_CPU + CONFIG_NEWBIOS_TOOL_INFO_PCI + CONFIG_NEWBIOS_TOOL_INFO_USB \
+                    + CONFIG_NEWBIOS_TOOL_INFO_ISA + CONFIG_NEWBIOS_TOOL_INFO_IDE + CONFIG_NEWBIOS_TOOL_CHIPSET_REGS)
+#define TOOLS_BENCH (CONFIG_NEWBIOS_TOOL_BENCH_MEMORY + CONFIG_NEWBIOS_TOOL_BENCH_CPU + CONFIG_NEWBIOS_TOOL_BENCH_DISK \
+                    + CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED)
+#define TOOLS_TEST (CONFIG_NEWBIOS_TOOL_BOARD_TEST + CONFIG_NEWBIOS_TOOL_MEMTEST + CONFIG_NEWBIOS_TOOL_CACHE_TEST \
+               + CONFIG_NEWBIOS_TOOL_L2_SRAM_TEST + CONFIG_NEWBIOS_TOOL_SURFACE_SCAN)
+
+#if CONFIG_NEWBIOS_TOOL_BENCH_MEMORY
+static void info_bench_memory(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU
+static void info_bench_cpu(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK
+static void info_bench_disk(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED
+static void info_bench_disk_bars(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_BOARD_TEST
+static void board_test(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
+static void mt_run(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_CACHE_TEST
 static void l2_test_run(void);
+#endif
+#if CONFIG_NEWBIOS_TOOL_L2_SRAM_TEST
 static void l2_sram_test(void);
 #endif
-static void board_test(void);
+#if CONFIG_NEWBIOS_TOOL_SURFACE_SCAN
 static void surface_scan(void);
+#endif
 
 struct tool {
     const char *title, *help;
@@ -2083,31 +2129,57 @@ struct tool {
 };
 
 static const struct tool InfoPages[] = {
+#if CONFIG_NEWBIOS_TOOL_INFO_CPU
     { "CPU, CACHE AND MEMORY", NULL, info_cpu },
+#endif
+#if CONFIG_NEWBIOS_TOOL_INFO_PCI
     { "PCI DEVICES", NULL, info_pci },
+#endif
+#if CONFIG_NEWBIOS_TOOL_INFO_USB
     { "USB DEVICES", NULL, info_usb },
+#endif
+#if CONFIG_NEWBIOS_TOOL_INFO_ISA
     { "ISA RESOURCES AND IRQ MAP", NULL, info_isa },
+#endif
+#if CONFIG_NEWBIOS_TOOL_INFO_IDE
     { "IDE DRIVES", "Drives found at this boot", info_ide },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#endif
+#if CONFIG_NEWBIOS_TOOL_CHIPSET_REGS
     { "CHIPSET REGISTERS", NULL, info_chipset },
 #endif
 };
 
 static const struct tool Benchmarks[] = {
+#if CONFIG_NEWBIOS_TOOL_BENCH_MEMORY
     { "MEMORY SPEED", "Memory speed (MB/s) by block size", info_bench_memory },
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU
     { "CPU BENCHMARK", "Integer and floating point speed, with 486 references", info_bench_cpu },
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK
     { "HARD DISK BENCHMARK", "Any IDE or USB disk: seek times, buffered and linear read speed", info_bench_disk },
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED
     { "HARD DISK SPEED", "Linear read speed of each IDE or USB disk, with the PIO mode limits", info_bench_disk_bars },
+#endif
 };
 
 static const struct tool Tests[] = {
+#if CONFIG_NEWBIOS_TOOL_BOARD_TEST
     { "BOARD TEST", "IRQ lines, timers, RTC, DMA, IDE cable, video memory, buses, CMOS RAM, keyboard", board_test },
+#endif
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
     { "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM", mt_run },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#endif
+#if CONFIG_NEWBIOS_TOOL_CACHE_TEST
     { "CACHE TEST", "L2 cache: each write policy, timing and tag width", l2_test_run },
+#endif
+#if CONFIG_NEWBIOS_TOOL_L2_SRAM_TEST
     { "L2 SRAM TEST", "L2 cache chips: which one fails", l2_sram_test },
 #endif
+#if CONFIG_NEWBIOS_TOOL_SURFACE_SCAN
     { "HDD SURFACE SCAN", "IDE hard disk: every sector read and checked (ESC stops)", surface_scan },
+#endif
 };
 
 static const struct {
@@ -2169,16 +2241,24 @@ static const struct {
     { M_PAGE, 5, "INTEGRATED PERIPHERALS", "Onboard IDE, FDC, Serial and Parallel Ports" },
 #endif
     { M_PASSWORD, 0, "SUPERVISOR PASSWORD", "Change, Set, or Disable Password" },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if TOOLS_INFO == 6
     { M_TOOLS, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, USB, ISA/IRQ, IDE Drives, Chipset Registers" },
-#else
+#elif TOOLS_INFO == 5 && !CONFIG_NEWBIOS_CHIPSET_UMC
     { M_TOOLS, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, USB, ISA/IRQ, IDE Drives" },
+#elif TOOLS_INFO
+    { M_TOOLS, 0, "HARDWARE INFORMATION", "Hardware information pages" },
 #endif
+#if TOOLS_BENCH == 4
     { M_TOOLS, 1, "BENCHMARKS", "Memory Speed Chart, CPU, Hard Disk" },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#elif TOOLS_BENCH
+    { M_TOOLS, 1, "BENCHMARKS", "Speed measurements" },
+#endif
+#if TOOLS_TEST == 5
     { M_TOOLS, 2, "HARDWARE TESTS", "Board, Memory, L2 Cache and its SRAM, Hard Disk Surface" },
-#else
+#elif TOOLS_TEST == 3 && !CONFIG_NEWBIOS_CHIPSET_UMC
     { M_TOOLS, 2, "HARDWARE TESTS", "Board, Memory, Hard Disk Surface" },
+#elif TOOLS_TEST
+    { M_TOOLS, 2, "HARDWARE TESTS", "Hardware tests" },
 #endif
     { M_BIOS_DEFAULTS, 0, "LOAD BIOS DEFAULTS", "Load BIOS Defaults except Standard CMOS SETUP" },
     { M_DEFAULTS, 0, "LOAD SETUP DEFAULTS", "Load SETUP Defaults except Standard CMOS SETUP" },
@@ -2313,12 +2393,14 @@ cpu_short_name(int *mhz)
     return name;
 }
 
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 static u32
 l2_size_kb(void)
 {
     u8 l2 = CONFIG_NEWBIOS_CHIPSET_UMC ? pci_config_readb(HB_BDF, 0x50) : 0;
     return (l2 & 0x80) && (l2 & 7) ? 32 << (l2 & 7) : 0;
 }
+#endif
 
 // Award-style POST screen in the BIOS text mode: CPU, cache; then the memory test and the
 // read speed chart fill it, and the teletype output continues below.
@@ -2462,8 +2544,11 @@ memtest(void)
 
 // Memory read speed by block size, 4K to 2M in quarter octaves: L1, L2 and DRAM show up as steps.
 #define SPEED_POINTS 37
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 static u16 SpeedMBs[SPEED_POINTS];
+#endif
 
+#if TOOL_SPEED_POINTS
 // Block size of point i: 4 KiB * 2^(i/4), a multiple of 64 bytes.
 static u32
 speed_block(int i)
@@ -2471,7 +2556,9 @@ speed_block(int i)
     static const u16 quarter[4] = { 1000, 1189, 1414, 1682 };   // 1000 * 2^(n/4)
     return (64u << (i / 4)) * quarter[i % 4] / 1000 * 64;
 }
+#endif
 
+#if TOOL_MEM_SPEED
 static void
 read_block(u32 addr, u32 bytes)
 {
@@ -2485,14 +2572,18 @@ read_block(u32 addr, u32 bytes)
 }
 
 static u16 mem_speed(int kind, u32 src, u32 dst, u32 block);
+#endif
 
+#if TOOL_READ_SPEED
 // MB/s reading 'block' bytes from 1 MiB over and over.
 static u16
 read_speed(u32 block)
 {
     return mem_speed(0, 0x100000, 0x100000, block);
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 // Measured once, the first time setup shows the speeds (about 1 s).
 static void
 read_speed_measure(void)
@@ -2503,6 +2594,7 @@ read_speed_measure(void)
     for (i = 0; i < SPEED_POINTS; i++)
         SpeedMBs[i] = speed_block(i) <= ext_mem_kb() * 1024 ? read_speed(speed_block(i)) : 0;
 }
+#endif
 
 #if CONFIG_NEWBIOS_CHIPSET_UMC
 // External cache enabled like the original BIOS at POST 52h: coreboot only sized it and left it off.
@@ -2610,6 +2702,7 @@ l2_scratch(u32 size, u32 *end)
 }
 
 static int L2Log;       // CACHE TEST step log on: its next row
+#define L2_LOG_ON (CONFIG_NEWBIOS_TOOL_CACHE_TEST && L2Log)
 
 #define L2_LOG_TOP 3
 #define L2_LOG_END (ROW_HELP - 1)
@@ -2617,7 +2710,7 @@ static int L2Log;       // CACHE TEST step log on: its next row
 static void
 l2_log(const char *text)
 {
-    if (!L2Log)
+    if (!L2_LOG_ON)
         return;
     if (L2Log > L2_LOG_END) {                   // full: start again at the top
         for (int r = L2_LOG_TOP; r <= L2_LOG_END; r++)
@@ -2640,7 +2733,7 @@ l2_step(int step, const char *text)
         scr_fill(ROW_CACHE, 0, 80, AttrText, ' ');
         scr_puts(ROW_CACHE, 0, AttrText, line);
     }
-    if (L2Log) {
+    if (L2_LOG_ON) {
         char line[80];
         snprintf(line, sizeof(line), "Step %d %s: %s", step, L2StepNames[step], text);
         l2_log(line);
@@ -2665,8 +2758,10 @@ static void
 l2_fill_logged(u32 base, u32 end, u8 hb50)
 {
     char line[80];
-    snprintf(line, sizeof(line), "  50h=%02x reading %08x-%08x", hb50, base, end - 1);
-    l2_log(line);
+    if (CONFIG_NEWBIOS_TOOL_CACHE_TEST) {
+        snprintf(line, sizeof(line), "  50h=%02x reading %08x-%08x", hb50, base, end - 1);
+        l2_log(line);
+    }
     l2_fill(base, (end - base) / 4, hb50);
 }
 
@@ -2678,7 +2773,7 @@ l2_samples(u32 base, u32 end, u32 *dram, int through_l2)
 {
     u32 step = (end - base) / L2_SAMPLES, bad = 0, first = 0, got = 0, want = 0;
     char line[80];
-    if (!L2Log)
+    if (!L2_LOG_ON)
         return;
     for (int i = 0; i < L2_SAMPLES; i++) {
         u32 addr = base + step * i + 0x40, val = readl((void *)addr);
@@ -2707,6 +2802,8 @@ l2_check(int caches, u32 addr, u32 size, u8 hb50)
     char line[80];
     L2Got[0] = L2Got[1] = 0xdeadbeef;
     int ok = caches ? l2_caches(addr, size, hb50) : l2_line_works(addr, size, hb50);
+    if (!CONFIG_NEWBIOS_TOOL_CACHE_TEST)
+        return ok;
     if (caches)
         snprintf(line, sizeof(line), "  cached at %08x: read %08x, want %08x: %s", addr, L2Got[0],
                  L2Saved, ok ? "ok" : "FAIL");
@@ -2731,7 +2828,7 @@ l2_enable(u8 hb50, int tag8)
     u32 tag_max = cacheable / size - 1, samples[L2_SAMPLES];
     char line[80];
     int status;
-    if (L2Log) {
+    if (L2_LOG_ON) {
         snprintf(line, sizeof(line), "L2 %dK, scratch %08x-%08x, tags 0-%d, code %08x, stack %08x", size >> 10,
                  base, end - 1, tag_max, (u32)l2_enable, getesp());
         l2_log(line);
@@ -2767,12 +2864,13 @@ l2_enable(u8 hb50, int tag8)
     pci_config_writeb(HB_BDF, 0x55, hb55);
     wbinvd();
     cr0_write(cr0);
-    if (L2Log)
+    if (L2_LOG_ON)
         l2_log_regs("after ");
     return status;
 }
 
 // The L2 off again after l2_enable, its dirty lines written back first.
+#if TOOL_L2_RESTART
 static void
 l2_disable(u8 hb50)
 {
@@ -2787,9 +2885,10 @@ l2_disable(u8 hb50)
     pci_config_writeb(HB_BDF, 0x55, hb55);
     wbinvd();
     cr0_write(cr0);
-    if (L2Log)
+    if (L2_LOG_ON)
         l2_log_regs("off   ");
 }
+#endif
 
 static u8 L2PostHb50;   // what the POST enabled (0: none), for the CACHE TEST page to restore
 
@@ -2814,6 +2913,7 @@ setup_l2_cache(void)
     rtc_write(NB_CMOS_L2, found & 0x0f);
 }
 
+#if CONFIG_NEWBIOS_TOOL_CACHE_TEST
 // CACHE TEST: the POST's L2 init (l2_enable) with each write policy, timing (50h bits 5-4) and tag width on the
 // size the POST found. Enter runs the selected one step by step, each step and its values on screen for 1 s
 // (a photo of the last screen shows where it hangs); A runs all of them quickly. For each that works, the read
@@ -2931,7 +3031,9 @@ l2_test_run(void)
         rtc_write(NB_CMOS_L2, found);
     }
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_L2_SRAM_TEST
 /****************************************************************
  * L2 SRAM TEST: the L2 chips tested in place, at full speed, on any L2 this chipset takes.
  * Data chips: with UM8881 5Ah bit 6 (forced hit) every cacheable access goes to the L2 data SRAM whatever the tags
@@ -3304,6 +3406,7 @@ wait:
     wait_esc();
 }
 #endif
+#endif
 
 /****************************************************************
  * BOARD TEST: each IRQ line raised by its device on the board, the PIT channels and the RTC crystal, the DMA
@@ -3312,6 +3415,7 @@ wait:
  * up once its device raises it, down again once the device lowers it. POST codes C8h-CFh: the step running.
  ****************************************************************/
 
+#if CONFIG_NEWBIOS_TOOL_BOARD_TEST
 enum { IRQ_UNTESTED, IRQ_OK, IRQ_HIGH, IRQ_NONE, IRQ_KEPT };
 static const char * const IrqFault[] = {
     "", "", "up before its device raised it", "never reaches the PIC", "stays up after its device lowered it"
@@ -3424,7 +3528,9 @@ irq_fpu(void)
     asm volatile("fninit");
     cr0_write(cr0);
 }
+#endif
 
+#if TOOL_IDE_IO
 // The alternate status (it leaves the interrupt pending) once BSY is clear and, if want, DRQ or ERR is set;
 // -1 after ms.
 static int
@@ -3449,7 +3555,9 @@ ide_select(int idx)
     ide_ready(ad, 0, 500);
     return ad;
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BOARD_TEST
 // IRQ 14/15 by CHECK POWER MODE (no data; its end interrupts, an abort too), the drive's interrupt on meanwhile.
 static void
 irq_ide(int idx)
@@ -4281,12 +4389,14 @@ board_test(void)
             return;
     }
 }
+#endif
 
 /****************************************************************
  * HDD SURFACE SCAN: READ VERIFY of every sector of an IDE drive (nothing transferred), 256 at a time. A failing
  * command leaves the address of the bad sector in the drive's registers: listed, the scan goes on after it.
  ****************************************************************/
 
+#if CONFIG_NEWBIOS_TOOL_SURFACE_SCAN
 #define SCAN_ROWS 8                             // bad sectors listed
 
 static void mt_bar(int row, const char *name, u32 done, u32 total);
@@ -4415,6 +4525,7 @@ surface_scan(void)
             scan_disk(drive[sel]);
     }
 }
+#endif
 
 void
 setup_memtest(void)
@@ -4431,13 +4542,16 @@ enum { C_BLACK, C_BLUE, C_GREEN, C_CYAN, C_RED, C_MAGENTA, C_BROWN, C_GRAY, C_DG
        C_LRED, C_LMAGENTA, C_YELLOW, C_WHITE };
 #define GFX ((volatile u8 *)0xa0000)
 
+#if TOOL_GFX || CONFIG_NEWBIOS_TOOL_BOARD_TEST
 static void
 gfx_reg(u8 index, u8 val)
 {
     outb(index, 0x3ce);
     outb(val, 0x3cf);
 }
+#endif
 
+#if TOOL_GFX
 // Mode 12h with writes through set/reset (each write paints the bit mask's pixels in the color) and the video
 // BIOS's 8x8 font (60 rows): 0 without VGA.
 static int
@@ -4540,11 +4654,15 @@ gfx_title(const char *title)
     gfx_span(0, 639, 469, C_CYAN);
     gfx_text(59, 1, C_LCYAN, "ESC : Back");
 }
+#endif
 
 /* Memory: read, write and move speed by block size */
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_MEMORY
 static u16 MemMBs[3][SPEED_POINTS];             // read, write, move
+#endif
 
+#if TOOL_MEM_SPEED
 static void
 write_block(u32 addr, u32 bytes)
 {
@@ -4600,7 +4718,9 @@ mem_speed(int kind, u32 src, u32 dst, u32 block)
     restore_flags(flags);
     return ticks ? (done >> 10) * TimerKHz / ticks * 1024 / 1000 : 0;
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_MEMORY
 static void
 mem_measure(void)
 {
@@ -4669,16 +4789,20 @@ bench_memory(void)
     }
     return 0;
 }
+#endif
 
 /* CPU: integer (ALU) and floating point (FPU) speed against 486-class CPUs */
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU || TOOL_HD_BENCH
 // Microseconds in 'ticks' timer ticks, without 64-bit arithmetic.
 static u32
 ticks_us(u32 ticks)
 {
     return ticks / TimerKHz * 1000 + ticks % TimerKHz * 1000 / TimerKHz;
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU
 // Million instructions/s of 16 one-clock ALU instructions + dec/jnz (20 clocks on a 486 core) for about 30 ms.
 static u32
 cpu_alu_mips(void)
@@ -4723,7 +4847,9 @@ cpu_fpu_mflops(void)
     restore_flags(flags);
     return loops * 8 * 1000 / ticks_us(ticks);          // operations per ms = thousands per s
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU || CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED
 // A SpeedSys bar: this machine's value against references, labels above and below the scale.
 static void
 gfx_bar(int y, const char *title, u32 value, const char *unit, const char * const *ref_name, const u32 *ref_value,
@@ -4752,7 +4878,9 @@ gfx_bar(int y, const char *title, u32 value, const char *unit, const char * cons
         snprintf(text, sizeof(text), "%d %s", value, unit);
     gfx_text(y / 8 + 12, 5, C_YELLOW, text);
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU
 // The 486-class CPUs (Intel and AMD cores: the same clocks per instruction, so speed scales with the core clock).
 static const char * const RefCpu[] = {
     "486SX-25", "486DX-33", "486DX2-50", "486DX2-66", "486DX4-100", "5x86-133", "5x86-160"
@@ -4810,9 +4938,11 @@ bench_cpu(void)
         gfx_text(47, 2, C_GRAY, "their speed is this CPU's per MHz times their clock.");
     return 0;
 }
+#endif
 
 /* Hard disks: seek times, linear read speed across the disk, interface speed */
 
+#if TOOL_HD_BENCH
 #define HD_MAX    8
 #define HD_POINTS 64
 static struct {
@@ -4826,10 +4956,12 @@ static struct {
 } Hd[HD_MAX];
 static int HdCount;
 enum { HD_READ_ERROR = 1, HD_SLOW, HD_ABORTED, HD_SMALL };
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK
 static const char * const HdErrors[] = {
     "", "Read error at LBA %d", "Too slow: a read at LBA %d took over 2 s", "Stopped (ESC)",
     "Disk under 256 KB, or no memory"
 };
+#endif
 
 static void
 hd_list(void)
@@ -4942,7 +5074,9 @@ out:
     free(buf);
     return Hd[h].error ? -1 : 0;
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK
 static void
 hd_progress(int percent)
 {
@@ -5041,7 +5175,9 @@ bench_disk(void)
         }
     }
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED
 // The PIO mode limits of the ATA interface (MB/s x 10): the reference scale of the disk bars.
 static const char * const RefPio[] = { "PIO 0", "PIO 1", "PIO 2", "PIO 3", "PIO 4" };
 static const u32 RefPioKbs[] = { 3300, 5200, 8300, 11100, 16600 };
@@ -5068,7 +5204,9 @@ bench_disk_bars(void)
     gfx_text(56, 2, C_GRAY, "References: the transfer limit of each ATA PIO mode.");
     return 0;
 }
+#endif
 
+#if TOOL_GFX
 // The benchmark pages: graphics until ESC, then back to the text mode of the setup.
 static void
 bench_run(int (*page)(void))
@@ -5083,11 +5221,20 @@ bench_run(int (*page)(void))
         wait_esc();
     scr_open();
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_BENCH_MEMORY
 static void info_bench_memory(void) { bench_run(bench_memory); }
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_CPU
 static void info_bench_cpu(void) { bench_run(bench_cpu); }
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK
 static void info_bench_disk(void) { bench_run(bench_disk); }
+#endif
+#if CONFIG_NEWBIOS_TOOL_BENCH_DISK_SPEED
 static void info_bench_disk_bars(void) { bench_run(bench_disk_bars); }
+#endif
 
 
 static void
@@ -5170,6 +5317,7 @@ setup_post_summary(void)
  * above 1 MiB that POST does not use. Reimplemented around the POST code: CPU, cache, speeds.
  ****************************************************************/
 
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 #define MT_SEGS     8
 #define MT_CHUNK    0x40000                 // bytes between screen updates and key checks
 #define MT_ERR_ROWS 5
@@ -5207,13 +5355,17 @@ mt_rand(void)
     MtRand ^= MtRand << 5;
     return MtRand;
 }
+#endif
 
+#if TOOL_PROGRESS
 static u32
 mt_seconds(void)
 {
     return rtc_get(CMOS_RTC_HOURS) * 3600 + rtc_get(CMOS_RTC_MINUTES) * 60 + rtc_get(CMOS_RTC_SECONDS);
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 static void
 mt_error(u32 addr, u32 good, u32 bad)
 {
@@ -5252,7 +5404,9 @@ mt_tested(u32 addr)
             return 1;
     return 0;
 }
+#endif
 
+#if TOOL_PROGRESS
 // "Name     : nnn% " and a 40-character bar.
 static void
 mt_bar(int row, const char *name, u32 done, u32 total)
@@ -5264,7 +5418,9 @@ mt_bar(int row, const char *name, u32 done, u32 total)
     for (i = 0; i < 40; i++)
         scr_fill(row, 20 + i, 1, AttrText, i < pct * 40 / 100 ? 0xdb : 0xb0);
 }
+#endif
 
+#if CONFIG_NEWBIOS_TOOL_MEMTEST
 // Screen update and ESC check, between chunks.
 static void
 mt_poll(u32 addr)
@@ -5688,3 +5844,4 @@ mt_run(void)
         wait_esc();
     post_code(POST_SETUP);
 }
+#endif

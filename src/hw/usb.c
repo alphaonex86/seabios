@@ -252,7 +252,7 @@ usb_list_device(struct usbdevice_s *usbdev, u16 vid, u16 pid, u8 cls, u8 proto)
 {
     struct usbhub_s *hub = usbdev->hub;
     int parent = usb_listed_find(hub->usbdev ? (void*)hub->usbdev : (void*)hub->cntl);
-    int i = usb_listed_add(usbdev, parent);
+    int i = CONFIG_NEWBIOS_TOOL_INFO_USB ? usb_listed_add(usbdev, parent) : -1;
     usbdev->listed = i;
     if (i < 0)
         return;
@@ -544,7 +544,7 @@ usb_enumerate(struct usbhub_s *hub)
     u32 portcount = hub->portcount;
     hub->threads = portcount;
     hub->detectend = timer_calc(usb_time_sigatt);
-    if (!hub->usbdev && usb_listed_find(hub->cntl) < 0) {     // a root hub: list its controller
+    if (CONFIG_NEWBIOS_TOOL_INFO_USB && !hub->usbdev && usb_listed_find(hub->cntl) < 0) {   // a root hub: list it
         int i = usb_listed_add(hub->cntl, -1);
         if (i >= 0) {
             UsbListed[i].type = hub->cntl->type;
