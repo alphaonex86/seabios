@@ -40,10 +40,12 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_BOOT_DELAY] = 1, [NB_NUMLOCK] = 1, [NB_QUICK_POST] = 1, [NB_IDE_BLOCK] = 1, [NB_CHIPSET_AUTO] = 1, [NB_APM] = 1,
     [NB_IDE_32BIT] = 1, [NB_ISAPNP] = 1, [NB_IDE_PRIMARY] = 1, [NB_IDE_SECONDARY] = 1, [NB_FDC] = 1,
     [NB_COM1] = 1, [NB_COM2] = 2, [NB_LPT] = 1,
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     // manual chipset values: those of the original BIOS with auto configuration off
     [NB_DRAM_READ_WS] = 2, [NB_DRAM_WRITE_WS] = 2, [NB_L2_WS] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1, [NB_HOST_PCI_POST_WS] = 1,
     [NB_HOST_PCI_BURST] = 1, [NB_PCI_BUS_PARK] = 1, [NB_PCI_POSTED_WRITE] = 1,
     [NB_SLOW_REFRESH] = 1,
+#endif
 };
 
 #define SIO_INDEX 0x108
@@ -257,7 +259,7 @@ superio_apply(void)
 static int
 onboard_ide(void)
 {
-    return pci_config_readw(IDE_BDF, PCI_VENDOR_ID) == 0x1060;
+    return CONFIG_NEWBIOS_CHIPSET_UMC && pci_config_readw(IDE_BDF, PCI_VENDOR_ID) == 0x1060;
 }
 
 // UM8886BF IDE function: register 41h bit 7 primary, bit 6 secondary channel.
@@ -271,11 +273,12 @@ ide_channels_apply(void)
     pci_config_writeb(IDE_BDF, 0x41, v);
 }
 
-// Drive 0-3 (primary master ... secondary slave) of the onboard controller, or -1.
+// Drive 0-3 (primary master ... secondary slave) of the onboard controller (other boards: of the first two
+// channels), or -1.
 int
 setup_ide_index(int pci_bdf, int ataid, int slave)
 {
-    return (pci_bdf == IDE_BDF && ataid < 2) ? ataid * 2 + slave : -1;
+    return ((!CONFIG_NEWBIOS_CHIPSET_UMC || pci_bdf == IDE_BDF) && ataid < 2) ? ataid * 2 + slave : -1;
 }
 
 static u8
@@ -450,7 +453,7 @@ debug_chipset(void)
 u16
 setup_init(void)
 {
-    if (CONFIG_DEBUG_LEVEL)
+    if (CONFIG_DEBUG_LEVEL && CONFIG_NEWBIOS_CHIPSET_UMC)
         debug_chipset();
     if (cmos_valid()) {
         int i;
@@ -462,7 +465,7 @@ setup_init(void)
         int fails = rtc_read(NB_CMOS_BOOTFAIL) - 1;   // coreboot counted this POST already
         if (fails > 0)
             PrevPostCode = PrevLastPost;
-        if (!Setting[NB_CHIPSET_AUTO] && fails >= NB_BOOTFAIL_MAX)
+        if (CONFIG_NEWBIOS_CHIPSET_UMC && !Setting[NB_CHIPSET_AUTO] && fails >= NB_BOOTFAIL_MAX)
             ChipsetFallback = fails;                   // coreboot used the chipset defaults
     } else {
         dprintf(1, "CMOS settings invalid - defaults loaded\n");
@@ -471,7 +474,8 @@ setup_init(void)
     }
     cmos_write(Setting, Hdd, Password);
     floppy_motors_early((Setting[NB_FLOPPY_A] ? 1 : 0) | (Setting[NB_FLOPPY_B] ? 2 : 0));
-    superio_apply();
+    if (CONFIG_NEWBIOS_CHIPSET_UMC)
+        superio_apply();
     ide_channels_apply();
     return Setting[NB_BOOT1] | Setting[NB_BOOT2] << 4 | Setting[NB_BOOT3] << 8
         | Setting[NB_BOOT4] << 12;
@@ -607,7 +611,7 @@ scr_header(const char *title)
     int r;
     for (r = 0; r < 25; r++)
         scr_fill(r, 0, 80, AttrText, ' ');
-    scr_center(0, AttrTitle, "ROM PCI/ISA BIOS (MB-8433UUD)");
+    scr_center(0, AttrTitle, CONFIG_NEWBIOS_BOARD_MB8433 ? "ROM PCI/ISA BIOS (MB-8433UUD)" : "ROM PCI/ISA BIOS (" BIOS_NAME ")");
     scr_center(1, AttrTitle, title);
 }
 
@@ -740,12 +744,14 @@ static const char * const Delay[] = { "1 Sec", "2 Sec", "3 Sec", "5 Sec" };
 static const char * const Rate[] = { "6", "8", "10", "12", "15", "20", "24", "30" };
 static const char * const RepDelay[] = { "250", "500", "750", "1000" };
 static const char * const Security[] = { "Setup", "System" };
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static const char * const DramWs[] = { "3 WS", "2 WS", "1 WS", "0 WS" };
 static const char * const Ws[] = { "1 WS", "0 WS" };
 static const char * const L2Ws[] = { "3-2-2-2", "3-1-1-1", "2-2-2-2", "2-1-1-1" };
 static const char * const KbcClock[] = { "7.16MHz", "PCICLKI/4", "PCICLKI/3", "PCICLKI/2" };
 static const char * const PciClock[] = { "1 : 1", "1 : 2/3", "1 : 1/2" };
 static const char * const Devsel[] = { "Slow", "Medium", "Fast" };
+#endif
 static const char * const Standby[] = {
     "Disabled", "1 Min", "2 Min", "3 Min", "4 Min", "5 Min", "6 Min", "7 Min", "8 Min",
     "9 Min", "10 Min", "11 Min", "12 Min", "13 Min", "14 Min", "15 Min"
@@ -754,10 +760,12 @@ static const char * const Irq[] = {
     "Auto", "", "", "3", "4", "5", "", "7", "", "9", "10", "11", "12", "", "14", "15"
 };
 static const char * const Pio[] = { "Auto", "Mode 0", "Mode 1", "Mode 2", "Mode 3", "Mode 4" };
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static const char * const Com1[] = { "Disabled", "COM1/3F8", "COM3/3E8" };
 static const char * const Com2[] = { "Disabled", "COM2/2F8", "COM4/2E8" };
 static const char * const Lpt[] = { "Disabled", "378H", "278H" };
 static const char * const LptMode[] = { "SPP", "EPP", "ECP" };
+#endif
 
 #define F_MANUAL 1   // editable only when chipset auto configuration is off
 #define F_TYPE   2   // drive type: Auto, None, 1-46, User
@@ -822,7 +830,9 @@ rtc_fields_check(void)
 
 static const struct item BiosItems[] = {
     ENUM(4, 2, 31, NB_L1_CACHE, "CPU Internal Cache         :", OffOn, 0),
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     ENUM(5, 2, 31, NB_L2_CACHE, "External Cache             :", OffOn, 0),
+#endif
     ENUM(6, 2, 31, NB_BOOT1, "1st Boot Device            :", BootDev, 0),
     ENUM(7, 2, 31, NB_BOOT2, "2nd Boot Device            :", BootDev, 0),
     ENUM(8, 2, 31, NB_BOOT3, "3rd Boot Device            :", BootDev, 0),
@@ -836,14 +846,17 @@ static const struct item BiosItems[] = {
     ENUM(16, 2, 31, NB_SECURITY, "Security Option            :", Security, 0),
     ENUM(17, 2, 31, NB_QUICK_POST, "Quick Power On Self Test   :", OffOn, 0),
     ENUM(18, 2, 31, NB_IDE_BLOCK, "IDE HDD Block Mode         :", OffOn, 0),
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     ENUM(4, 45, 68, NB_SHADOW_C8, "C8000-CBFFF Shadow   :", OffOn, 0),
     ENUM(5, 45, 68, NB_SHADOW_CC, "CC000-CFFFF Shadow   :", OffOn, 0),
     ENUM(6, 45, 68, NB_SHADOW_D0, "D0000-D3FFF Shadow   :", OffOn, 0),
     ENUM(7, 45, 68, NB_SHADOW_D4, "D4000-D7FFF Shadow   :", OffOn, 0),
     ENUM(8, 45, 68, NB_SHADOW_D8, "D8000-DBFFF Shadow   :", OffOn, 0),
     ENUM(9, 45, 68, NB_SHADOW_DC, "DC000-DFFFF Shadow   :", OffOn, 0),
+#endif
 };
 
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static const struct item ChipItems[] = {
     ENUM(4, 2, 29, NB_CHIPSET_AUTO, "Auto Configuration       :", OffOn, 0),
     ENUM(6, 2, 29, NB_DRAM_READ_WS, "DRAM Read Wait States    :", DramWs, F_MANUAL),
@@ -864,6 +877,7 @@ static const struct item ChipItems[] = {
     ENUM(6, 42, 68, NB_PREEMPT_PCI, "Preempt PCI Master      :", OffOn, F_MANUAL),
     ENUM(7, 42, 68, NB_DEVSEL, "IBC DEVSEL# Decoding    :", Devsel, F_MANUAL),
 };
+#endif
 
 static const struct item PmItems[] = {
     ENUM(4, 2, 26, NB_APM, "APM BIOS              :", OffOn, 0),
@@ -883,6 +897,7 @@ static const struct item PciItems[] = {
     ENUM(15, 2, 30, NB_ISAPNP, "PnP BIOS Auto-Config      :", OffOn, 0),
 };
 
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static const struct item IoItems[] = {
     ENUM(4, 2, 30, NB_IDE_PRIMARY, "Onboard IDE Primary       :", OffOn, 0),
     ENUM(5, 2, 30, NB_IDE_SECONDARY, "Onboard IDE Secondary     :", OffOn, 0),
@@ -892,14 +907,19 @@ static const struct item IoItems[] = {
     ENUM(9, 2, 30, NB_LPT, "Onboard Parallel Port     :", Lpt, 0),
     ENUM(10, 2, 30, NB_LPT_MODE, "Onboard Parallel Mode     :", LptMode, 0),
 };
+#endif
 
 static const struct page Pages[] = {
     { "STANDARD CMOS SETUP", StdItems, ARRAY_SIZE(StdItems), draw_std },
     { "BIOS FEATURES SETUP", BiosItems, ARRAY_SIZE(BiosItems), NULL },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { "CHIPSET FEATURES SETUP", ChipItems, ARRAY_SIZE(ChipItems), NULL },
-    { "POWER MANAGEMENT SETUP", PmItems, ARRAY_SIZE(PmItems), NULL },
+#endif
+    [3] = { "POWER MANAGEMENT SETUP", PmItems, ARRAY_SIZE(PmItems), NULL },   // Menu's index in any case
     { "PNP/PCI CONFIGURATION", PciItems, ARRAY_SIZE(PciItems), NULL },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { "INTEGRATED PERIPHERALS", IoItems, ARRAY_SIZE(IoItems), NULL },
+#endif
 };
 
 static int
@@ -1071,8 +1091,11 @@ draw_std(void)
 
 // LOAD BIOS DEFAULTS: the original BIOS's fail-safe values where they differ from the Setup ones.
 static const struct { u8 var, value; } FailSafe[] = {
-    { NB_QUICK_POST, 0 }, { NB_SYSBIOS_CACHE, 0 }, { NB_VIDBIOS_CACHE, 0 }, { NB_SLOW_REFRESH, 0 },
+    { NB_QUICK_POST, 0 },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
+    { NB_SYSBIOS_CACHE, 0 }, { NB_VIDBIOS_CACHE, 0 }, { NB_SLOW_REFRESH, 0 },
     { NB_PCI_POSTED_WRITE, 0 }, { NB_COM2, 1 }, { NB_LPT_MODE, 2 },
+#endif
 };
 
 // Defaults for everything but the Standard CMOS page, as the original BIOS does.
@@ -1360,44 +1383,55 @@ info_cpu(void)
         if (bus10 * 25 >= std_bus10[i] * 24 && bus10 * 25 <= std_bus10[i] * 26)
             bus10 = std_bus10[i];
     u32 bus = (bus10 + 5) / 10;
-    u8 hb50 = pci_config_readb(HB_BDF, 0x50), hb51 = pci_config_readb(HB_BDF, 0x51);
-    u8 a4 = pci_config_readb(IBC_BDF, 0xa4) & 3, i56 = pci_config_readb(IBC_BDF, 0x56) & 3;
+    u8 hb50 = 0, hb51 = 0, a4 = 0, i56 = 0;
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        hb50 = pci_config_readb(HB_BDF, 0x50);
+        hb51 = pci_config_readb(HB_BDF, 0x51);
+        a4 = pci_config_readb(IBC_BDF, 0xa4) & 3;
+        i56 = pci_config_readb(IBC_BDF, 0x56) & 3;
+    }
     u32 pci10 = a4 == 1 ? bus10 : a4 == 2 ? bus10 * 2 / 3 : bus10 / 2;   // host:PCI 1:1, 2/3, 1/2
     info_printf(row++, "Core clock     : %d MHz (measured)", mhz);
     info_printf(row++, "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)", bus10 / 10,
                 bus10 % 10, mult);
-    if (i56 < 2)
-        snprintf(line, sizeof(line), "PCI / ISA clock: %d.%d MHz (host:PCI %s) / %d.%d MHz (PCICLK/%d)", pci10 / 10,
-                 pci10 % 10, a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2", pci10 / (i56 ? 4 : 3) / 10,
-                 pci10 / (i56 ? 4 : 3) % 10, i56 ? 4 : 3);
-    else
-        snprintf(line, sizeof(line), "PCI clock      : %d.%d MHz (host:PCI %s)", pci10 / 10, pci10 % 10,
-                 a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2");
-    info_printf(row++, "%s", line);
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        if (i56 < 2)
+            snprintf(line, sizeof(line), "PCI / ISA clock: %d.%d MHz (host:PCI %s) / %d.%d MHz (PCICLK/%d)", pci10 / 10,
+                     pci10 % 10, a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2", pci10 / (i56 ? 4 : 3) / 10,
+                     pci10 / (i56 ? 4 : 3) % 10, i56 ? 4 : 3);
+        else
+            snprintf(line, sizeof(line), "PCI clock      : %d.%d MHz (host:PCI %s)", pci10 / 10, pci10 % 10,
+                     a4 == 1 ? "1:1" : a4 == 2 ? "2/3" : "1/2");
+        info_printf(row++, "%s", line);
+    }
     row++;
     u32 fam = (fms >> 8) & 0xf, model = (fms >> 4) & 0xf;
     int l1kb = fam == 4 && (model == 8 || model == 9 || model >= 14) ? 16 : 8;   // DX4, Am5x86: 16 KB
     info_printf(row++, "L1 cache       : %d KB, %s, at %d MHz (core clock)", l1kb,
                 (cr0_read() & CR0_CD) ? "disabled" : "enabled", mhz);
-    static const char * const l2_timing[] = { "3-2-2-2", "3-1-1-1", "2-2-2-2", "2-1-1-1" };
-    u8 l2 = hb50, found = rtc_read(NB_CMOS_L2);
-    if (L2Status == L2_OK || L2Status == L2_NOT_RUN)
-        snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s), %d MHz, %s",
-                 (l2 & 7) ? 32 << (l2 & 7) : 0, (l2 & 0x40) ? "write-back" : "write-through",
-                 (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1, bus, l2_timing[(l2 >> 4) & 3]);
-    else if (L2Status == L2_NONE)
-        snprintf(line, sizeof(line), "L2 cache       : none");
-    else if (L2Status == L2_HUNG && L2HungStep)
-        snprintf(line, sizeof(line), "L2 cache       : %d KB, OFF: last init stopped at %s",
-                 (found & 7) ? 32 << (found & 7) : 0, L2StepNames[L2HungStep]);
-    else    // found but left off: why
-        snprintf(line, sizeof(line), "L2 cache       : %d KB, %d bank(s), OFF: %s",
-                 (found & 7) ? 32 << (found & 7) : 0, (found & 8) ? 2 : 1, L2Names[L2Status]);
-    info_printf(row++, "%s", line);
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        static const char * const l2_timing[] = { "3-2-2-2", "3-1-1-1", "2-2-2-2", "2-1-1-1" };
+        u8 l2 = hb50, found = rtc_read(NB_CMOS_L2);
+        if (L2Status == L2_OK || L2Status == L2_NOT_RUN)
+            snprintf(line, sizeof(line), "L2 cache       : %d KB, %s, %s, %d bank(s), %d MHz, %s",
+                     (l2 & 7) ? 32 << (l2 & 7) : 0, (l2 & 0x40) ? "write-back" : "write-through",
+                     (l2 & 0x80) ? "enabled" : "disabled", (l2 & 8) ? 2 : 1, bus, l2_timing[(l2 >> 4) & 3]);
+        else if (L2Status == L2_NONE)
+            snprintf(line, sizeof(line), "L2 cache       : none");
+        else if (L2Status == L2_HUNG && L2HungStep)
+            snprintf(line, sizeof(line), "L2 cache       : %d KB, OFF: last init stopped at %s",
+                     (found & 7) ? 32 << (found & 7) : 0, L2StepNames[L2HungStep]);
+        else    // found but left off: why
+            snprintf(line, sizeof(line), "L2 cache       : %d KB, %d bank(s), OFF: %s",
+                     (found & 7) ? 32 << (found & 7) : 0, (found & 8) ? 2 : 1, L2Names[L2Status]);
+        info_printf(row++, "%s", line);
+    }
     row++;
     u32 extkb = ext_mem_kb();
     info_printf(row++, "DRAM           : %d KB (base %d KB, extended %d KB)", extkb + 1024, GET_BDA(mem_size_kb),
                 extkb);
+    if (!CONFIG_NEWBIOS_CHIPSET_UMC)
+        return;
     info_printf(row++, "DRAM timing    : at %d MHz (bus), %s, read %d WS, write %d WS", bus,
                 (pci_config_readb(HB_BDF, 0x61) & 0xc0) ? "EDO" : "fast page mode", 3 - (hb51 >> 6),
                 3 - (hb51 >> 4 & 3));
@@ -1501,7 +1535,7 @@ irq_owners(const char *owner[16])
         if (pci_config_readb(pci->bdf, PCI_INTERRUPT_PIN) && irq && irq < 16)
             owner[irq] = pci_class_name(pci->class);
     }
-    for (i = 0; i < 4; i++) {                  // PIRQ links, even without a device (level mode)
+    for (i = 0; CONFIG_NEWBIOS_CHIPSET_UMC && i < 4; i++) {   // PIRQ links, even without a device (level mode)
         u8 irq = pci_config_readb(IBC_BDF, 0x43 + i / 2) >> (i & 1 ? 0 : 4) & 0x0f;
         if (irq && !owner[irq][0])
             owner[irq] = "PCI interrupt";
@@ -1605,6 +1639,7 @@ info_ide(void)
     }
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static void
 info_regs(const char *name, u16 bdf, int first, int rows, int row)
 {
@@ -1654,6 +1689,7 @@ info_chipset(void)
     outb(0x55, SIO_INDEX);
     info_printf(20, "UM8663BF super I/O   C0: %02X  C1: %02X", c0, c1);
 }
+#endif
 
 static void info_bench_memory(void);
 static void info_bench_cpu(void);
@@ -2034,8 +2070,10 @@ setup_boot_password(void)
  * Main menu
  ****************************************************************/
 
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 static void l2_test_run(void);
 static void l2_sram_test(void);
+#endif
 static void board_test(void);
 static void surface_scan(void);
 
@@ -2050,7 +2088,9 @@ static const struct tool InfoPages[] = {
     { "USB DEVICES", NULL, info_usb },
     { "ISA RESOURCES AND IRQ MAP", NULL, info_isa },
     { "IDE DRIVES", "Drives found at this boot", info_ide },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { "CHIPSET REGISTERS", NULL, info_chipset },
+#endif
 };
 
 static const struct tool Benchmarks[] = {
@@ -2063,8 +2103,10 @@ static const struct tool Benchmarks[] = {
 static const struct tool Tests[] = {
     { "BOARD TEST", "IRQ lines, timers, RTC, DMA, IDE cable, video memory, buses, CMOS RAM, keyboard", board_test },
     { "MEMORY TEST", "memtest86+ 4.20 tests on the free RAM", mt_run },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { "CACHE TEST", "L2 cache: each write policy, timing and tag width", l2_test_run },
     { "L2 SRAM TEST", "L2 cache chips: which one fails", l2_sram_test },
+#endif
     { "HDD SURFACE SCAN", "IDE hard disk: every sector read and checked (ESC stops)", surface_scan },
 };
 
@@ -2113,15 +2155,31 @@ static const struct {
     const char *name, *help;
 } Menu[] = {
     { M_PAGE, 0, "STANDARD CMOS SETUP", "Time, Date, Hard Disk Type, Floppy..." },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_PAGE, 1, "BIOS FEATURES SETUP", "Caches, Boot Sequence, Keyboard, Shadow..." },
+#else
+    { M_PAGE, 1, "BIOS FEATURES SETUP", "Cache, Boot Sequence, Keyboard..." },
+#endif
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_PAGE, 2, "CHIPSET FEATURES SETUP", "DRAM and Cache Timing (Auto Configuration)" },
+#endif
     { M_PAGE, 3, "POWER MANAGEMENT SETUP", "APM BIOS, HDD Standby Timer" },
     { M_PAGE, 4, "PNP/PCI CONFIGURATION", "PCI IRQ Routing, IDE PIO Modes" },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_PAGE, 5, "INTEGRATED PERIPHERALS", "Onboard IDE, FDC, Serial and Parallel Ports" },
+#endif
     { M_PASSWORD, 0, "SUPERVISOR PASSWORD", "Change, Set, or Disable Password" },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_TOOLS, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, USB, ISA/IRQ, IDE Drives, Chipset Registers" },
+#else
+    { M_TOOLS, 0, "HARDWARE INFORMATION", "CPU, Memory, PCI, USB, ISA/IRQ, IDE Drives" },
+#endif
     { M_TOOLS, 1, "BENCHMARKS", "Memory Speed Chart, CPU, Hard Disk" },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_TOOLS, 2, "HARDWARE TESTS", "Board, Memory, L2 Cache and its SRAM, Hard Disk Surface" },
+#else
+    { M_TOOLS, 2, "HARDWARE TESTS", "Board, Memory, Hard Disk Surface" },
+#endif
     { M_BIOS_DEFAULTS, 0, "LOAD BIOS DEFAULTS", "Load BIOS Defaults except Standard CMOS SETUP" },
     { M_DEFAULTS, 0, "LOAD SETUP DEFAULTS", "Load SETUP Defaults except Standard CMOS SETUP" },
     { M_SAVE, 0, "SAVE & EXIT SETUP", "Save Data to CMOS & Exit SETUP" },
@@ -2258,7 +2316,7 @@ cpu_short_name(int *mhz)
 static u32
 l2_size_kb(void)
 {
-    u8 l2 = pci_config_readb(HB_BDF, 0x50);
+    u8 l2 = CONFIG_NEWBIOS_CHIPSET_UMC ? pci_config_readb(HB_BDF, 0x50) : 0;
     return (l2 & 0x80) && (l2 & 7) ? 32 << (l2 & 7) : 0;
 }
 
@@ -2275,7 +2333,7 @@ setup_post_banner(void)
     AttrText = 0x07;
     if (GET_BDA(video_mode) != 3)
         return;
-    scr_puts(0, 0, AttrText, "Biostar MB-8433UUD-A");
+    scr_puts(0, 0, AttrText, CONFIG_NEWBIOS_BOARD_MB8433 ? "Biostar MB-8433UUD-A" : BIOS_NAME);
     scr_puts(1, 0, AttrText, RELEASE_DATE);
     scr_puts(24, 0, AttrText, VERSION);
     if (mhz)
@@ -2283,7 +2341,8 @@ setup_post_banner(void)
     else
         snprintf(line, sizeof(line), "%s CPU", name);
     scr_puts(ROW_CPU, 0, AttrText, line);
-    setup_l2_post_line();
+    if (CONFIG_NEWBIOS_CHIPSET_UMC)
+        setup_l2_post_line();
     cursor_row(ROW_TTY);                    // teletype output continues below
 }
 
@@ -2445,6 +2504,7 @@ read_speed_measure(void)
         SpeedMBs[i] = speed_block(i) <= ext_mem_kb() * 1024 ? read_speed(speed_block(i)) : 0;
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_UMC
 // External cache enabled like the original BIOS at POST 52h: coreboot only sized it and left it off.
 // The tag RAM has no valid bits, so with L1 and the BIOS segment out of the caches, reading every
 // dword of 8 L2 sizes of DRAM fills every line; this runs from the F segment and uses no memory
@@ -3243,6 +3303,7 @@ wait:
     scr_puts(ROW_HELP, 2, AttrText, "ESC : Back");
     wait_esc();
 }
+#endif
 
 /****************************************************************
  * BOARD TEST: each IRQ line raised by its device on the board, the PIT channels and the RTC crystal, the DMA
@@ -4053,7 +4114,8 @@ static void
 bt_isa_mem(void)
 {
     char line[80];
-    u8 hb54 = pci_config_readb(HB_BDF, 0x54), unit[48] = { 0 };   // per 2K: 1 ROM block, 2 RAM
+    u8 hb54 = CONFIG_NEWBIOS_CHIPSET_UMC ? pci_config_readb(HB_BDF, 0x54) : 0;
+    u8 unit[48] = { 0 };                        // per 2K: 1 ROM block, 2 RAM
     int found = 0;
     post_code(0xce);
     for (u32 a = 0xc8000; a < 0xe0000; a += 2048) {
@@ -4125,7 +4187,10 @@ static int
 board_port(u16 port)
 {
     static const u16 own[][2] = {
-        { 0x108, 2 }, { 0x170, 8 }, { 0x1f0, 8 }, { PNP_READ, 1 }, { PNP_ADDRESS, 1 }, { 0x376, 2 }, { 0x3b0, 0x30 },
+#if CONFIG_NEWBIOS_CHIPSET_UMC
+        { SIO_INDEX, 2 },
+#endif
+        { 0x170, 8 }, { 0x1f0, 8 }, { PNP_READ, 1 }, { PNP_ADDRESS, 1 }, { 0x376, 2 }, { 0x3b0, 0x30 },
         { 0x3f0, 8 },
     };
     int i;
@@ -4715,13 +4780,16 @@ bench_cpu(void)
     gfx_text(row++, 2, C_WHITE, fms ? text : "CPUID       : none (pre-CPUID 486)");
     snprintf(text, sizeof(text), "FPU         : %s", fpu ? "integrated" : "none");
     gfx_text(row++, 2, C_WHITE, text);
-    u8 l2 = pci_config_readb(HB_BDF, 0x50);
-    snprintf(text, sizeof(text), "L2 cache    : %s", L2Status == L2_OK ? (l2 & 0x40 ? "on, write-back" : "on, write-through")
-             : L2Names[L2Status]);
-    gfx_text(row++, 2, C_WHITE, text);
+    if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+        u8 l2 = pci_config_readb(HB_BDF, 0x50);
+        snprintf(text, sizeof(text), "L2 cache    : %s", L2Status == L2_OK ? (l2 & 0x40 ? "on, write-back" : "on, write-through")
+                 : L2Names[L2Status]);
+        gfx_text(row++, 2, C_WHITE, text);
+    }
     snprintf(text, sizeof(text), "Memory      : %d KB", 1024 + ext_mem_kb());
     gfx_text(row++, 2, C_WHITE, text);
-    gfx_text(row++, 2, C_WHITE, "Chipset     : UMC UM8881F + UM8886BF");
+    if (CONFIG_NEWBIOS_CHIPSET_UMC)
+        gfx_text(row++, 2, C_WHITE, "Chipset     : UMC UM8881F + UM8886BF");
     snprintf(text, sizeof(text), "BIOS        : " BIOS_NAME " %s", RELEASE_DATE);
     gfx_text(row++, 2, C_WHITE, text);
     if (known && mhz) {                         // references: this CPU's own speed per MHz
@@ -5055,7 +5123,7 @@ setup_post_summary(void)
     char rule[79], left[48], right[48], ports[32];
     int mhz, i;
     const char *name = cpu_short_name(&mhz);
-    u8 l2 = pci_config_readb(HB_BDF, 0x50);
+    u8 l2 = CONFIG_NEWBIOS_CHIPSET_UMC ? pci_config_readb(HB_BDF, 0x50) : 0;
     char vendor[13];
     u32 fms, fpu;
     if (!cpu_ident(vendor, &fms, &fpu))
