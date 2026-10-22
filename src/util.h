@@ -52,7 +52,7 @@ int boot_lchs_find_ata_device(struct pci_device *pci, int chanid, int slave,
 extern u8 ApmEnabled;
 
 // setup.c
-// mb-8433UUD POST codes on port 80h for a POST card, in POST order (mb-8433UUD-A-BIOS/POSTCODES.md).
+// mb-8433UUD POST codes on port 80h for a POST card, in POST order (retro-firmware boards/mb8433uud/POSTCODES.md).
 enum { POST_SEABIOS = 0xb0, POST_PLATFORM, POST_VGA, POST_BANNER, POST_DEVICES, POST_MEMTEST,
        POST_OPTIONROMS, POST_SUMMARY, POST_PROMPT, POST_SETUP, POST_SETUP_MEMTEST, POST_PREPBOOT,
        POST_BOOT, POST_NO_BOOT };
