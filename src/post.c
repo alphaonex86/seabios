@@ -79,8 +79,8 @@ bda_init(void)
     memset(bda, 0, sizeof(*bda));
 
     int esize = EBDA_SIZE_START;
-//    u16 ebda_seg = EBDA_SEGMENT_START;
-    u16 ebda_seg = 0xe000;	//pc2005 TODO
+    int eseg = CONFIG_NEWBIOS_EBDA_ESEG && CONFIG_MALLOC_UPPERMEMORY;
+    u16 ebda_seg = eseg ? 0xe000 : EBDA_SEGMENT_START;
 
     dprintf(3, "EBDA SEG %x %u\n", ebda_seg, esize);
 
@@ -94,15 +94,14 @@ bda_init(void)
     SET_BDA(ebda_seg, ebda_seg);
 
 //pc2005: EBDA in the E segment keeps 640 KiB free but needs writable shadow RAM at runtime
-    SET_BDA(mem_size_kb, CONFIG_MALLOC_UPPERMEMORY ? 640 : ebda_seg / (1024/16));
+    SET_BDA(mem_size_kb, eseg ? 640 : ebda_seg / (1024/16));
 
     // Init ebda
     struct extended_bios_data_area_s *ebda = get_ebda_ptr();
     memset(ebda, 0, sizeof(*ebda));
     ebda->size = esize;
 
-    e820_add((u32)ebda, (CONFIG_MALLOC_UPPERMEMORY ? 0xf0000 : BUILD_LOWRAM_END) - (u32)ebda
-             , E820_RESERVED);
+    e820_add((u32)ebda, (eseg ? 0xf0000 : BUILD_LOWRAM_END) - (u32)ebda, E820_RESERVED);
 
     // Init extra stack
     StackPos = &ExtraStack[BUILD_EXTRA_STACK_SIZE] - SYMBOL(zonelow_base);
@@ -196,7 +195,8 @@ void VISIBLE32FLAT
 startBoot(void)
 {
     // Clear low-memory allocations (required by PMM spec).
-//    memset((void*)BUILD_STACK_ADDR, 0, BUILD_EBDA_MINIMUM - BUILD_STACK_ADDR);
+    if (!CONFIG_NEWBIOS_EBDA_ESEG)
+        memset((void*)BUILD_STACK_ADDR, 0, BUILD_EBDA_MINIMUM - BUILD_STACK_ADDR);
 
     dprintf(3, "Jump to int19\n");
     struct bregs br;

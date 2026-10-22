@@ -102,6 +102,7 @@ choice
         bool "Biostar MB-8433UUD-A"
         select NEWBIOS_CHIPSET_UMC
         select NEWBIOS_ESCD_FLASH
+        select NEWBIOS_EBDA_ESEG
         help
             UMC UM8881F/UM8886BF chipset, UM8663BF super I/O, PnP BIOS ESCD
             in the Intel 28F001BX-T flash.
@@ -115,6 +116,8 @@ endchoice
     config NEWBIOS_CHIPSET_UMC
         bool
     config NEWBIOS_ESCD_FLASH
+        bool
+    config NEWBIOS_EBDA_ESEG
         bool
 
     config COREBOOT_FLASH

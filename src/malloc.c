@@ -496,7 +496,7 @@ malloc_preinit(void)
     dprintf(3, "A3\n");
 
     // Populate regions
-    // Conventional RAM only (BUILD_EBDA_MINIMUM is E0000 in this port): C8000-DFFFF goes back to the
+    // Conventional RAM only (BUILD_EBDA_MINIMUM is E0000 with NEWBIOS_EBDA_ESEG): C8000-DFFFF goes back to the
     // ISA bus after the option ROMs.
     alloc_add(&ZoneTmpLow, BUILD_STACK_ADDR, 0x90000);
     dprintf(3, "A4\n");
@@ -596,9 +596,8 @@ malloc_prepboot(void)
     dprintf(3, "malloc finalize\n");
 
     u32 base = rom_get_max();
-    // memset((void*)RomEnd, 0, base-RomEnd);
-    //TEST pc2005
-
+    if (!CONFIG_NEWBIOS_EBDA_ESEG)
+        memset((void*)RomEnd, 0, base-RomEnd);
 
     if (CONFIG_MALLOC_UPPERMEMORY) {
         // Place an optionrom signature around used low mem area.
@@ -652,8 +651,8 @@ e820_add(0x0, 0x1000, E820_RESERVED);
 #endif
 
 
-dprintf(3, "add eseg\n");
-e820_add(0xe0000, 0x10000, E820_RESERVED);
+    if (CONFIG_NEWBIOS_EBDA_ESEG)
+        e820_add(0xe0000, 0x10000, E820_RESERVED);
 
     calcRamSize();
 }
