@@ -160,6 +160,14 @@ choice
             UMC UM8881F/UM8886BF chipset, UM8663BF super I/O, PnP BIOS ESCD
             in the Intel 28F001BX-T flash.
 
+    config NEWBIOS_BOARD_APTIVA2168
+        bool "IBM Aptiva 2168 (Type I-2)"
+        select NEWBIOS_CHIPSET_OPTI_VIPERM
+        help
+            OPTi Viper-M 82C556M/557M/558M chipset with its MIDE IDE, SMC
+            FDC37C93x super I/O, Pentium P54C. No ESCD: its 28F010 flash
+            only erases as a whole.
+
     config NEWBIOS_BOARD_GENERIC
         bool "No board-specific code"
         help
@@ -167,6 +175,8 @@ choice
 endchoice
 
     config NEWBIOS_CHIPSET_UMC
+        bool
+    config NEWBIOS_CHIPSET_OPTI_VIPERM
         bool
     config NEWBIOS_ESCD_FLASH
         bool

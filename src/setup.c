@@ -28,6 +28,11 @@
 #include "post_serial.h" // post_serial (after x86.h: inb, outb)
 #include "bios_name.h" // BIOS_NAME
 
+#if CONFIG_NEWBIOS_BOARD_APTIVA2168     // bios_name.h is the MB-8433's (its coreboot has the same file)
+#undef BIOS_NAME
+#define BIOS_NAME "aptiva2168"
+#endif
+
 u8 Setting[NB_COUNT];
 static int SetupDefaulted, ChipsetFallback, PrevPostCode;   // POST warnings, see setup_post_warnings()
 static int PostWarned;                                       // warnings shown, the boot goes on: a longer prompt
