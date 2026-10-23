@@ -50,6 +50,8 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_DRAM_READ_WS] = 2, [NB_DRAM_WRITE_WS] = 2, [NB_L2_WS] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1, [NB_HOST_PCI_POST_WS] = 1,
     [NB_HOST_PCI_BURST] = 1, [NB_PCI_BUS_PARK] = 1, [NB_PCI_POSTED_WRITE] = 1,
     [NB_SLOW_REFRESH] = 1,
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    [NB_COM2] = 1,                              // over the value above: COM2 at 2F8h, as the IBM BIOS sets it
 #endif
 };
 
@@ -63,11 +65,19 @@ static const u8 Defaults[NB_COUNT] = {
 #define TOOL_IDE_IO (CONFIG_NEWBIOS_TOOL_BOARD_TEST || CONFIG_NEWBIOS_TOOL_SURFACE_SCAN)
 #define TOOL_PROGRESS (CONFIG_NEWBIOS_TOOL_MEMTEST || CONFIG_NEWBIOS_TOOL_SURFACE_SCAN)
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+#define SIO_INDEX 0x370                         // FDC37C93x
+#define SIO_DATA  0x371
+#define HB_BDF    pci_to_bdf(0, 0x00, 0)        // 82C557M
+#define IBC_BDF   pci_to_bdf(0, 0x01, 0)        // 82C558M
+#define IDE_BDF   pci_to_bdf(0, 0x14, 0)        // its MIDE
+#else
 #define SIO_INDEX 0x108
 #define SIO_DATA  0x109
 #define HB_BDF    pci_to_bdf(0, 0x10, 0)
 #define IBC_BDF   pci_to_bdf(0, 0x12, 0)
 #define IDE_BDF   pci_to_bdf(0, 0x12, 1)
+#endif
 #define CPU_P5    CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM   // Socket 7: Pentium names, clock by the TSC
 
 
@@ -247,6 +257,43 @@ sio_read(u8 reg)
     return inb(SIO_DATA);
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static void
+sio_write(u8 reg, u8 value)
+{
+    outb(reg, SIO_INDEX);
+    outb(value, SIO_DATA);
+}
+
+static void
+sio_device(u8 ld, int on, u16 base, u8 irq)
+{
+    sio_write(0x07, ld);
+    if (on) {
+        sio_write(0x60, base >> 8);
+        sio_write(0x61, base);
+        sio_write(0x70, irq);
+    }
+    sio_write(0x30, !!on);
+}
+
+// FDC37C93x logical devices 0 floppy, 4 and 5 serial ports, 3 parallel port (its mode in F0h, ECP FIFO threshold 7):
+// by default as the IBM BIOS sets them, COM1 3F8h IRQ 4, COM2 2F8h IRQ 3, LPT 3BCh IRQ 7 in printer mode.
+static void
+superio_apply(void)
+{
+    static const u16 lpt[] = { 0, 0x3bc, 0x378, 0x278 };
+    static const u8 lpt_mode[] = { 0x3c, 0x38, 0x39, 0x3a };   // printer, SPP, EPP, ECP
+    outb(0x55, SIO_INDEX);
+    outb(0x55, SIO_INDEX);
+    sio_device(0, Setting[NB_FDC], 0x3f0, 6);
+    sio_device(4, Setting[NB_COM1], Setting[NB_COM1] == 1 ? 0x3f8 : 0x3e8, 4);
+    sio_device(5, Setting[NB_COM2], Setting[NB_COM2] == 1 ? 0x2f8 : 0x2e8, 3);
+    sio_device(3, Setting[NB_LPT], lpt[Setting[NB_LPT]], Setting[NB_LPT] == 3 ? 5 : 7);
+    sio_write(0xf0, lpt_mode[Setting[NB_LPT_MODE]]);
+    outb(0xaa, SIO_INDEX);
+}
+#else
 // UM8663BF super I/O: C0h enables FDC/UART1/UART2/LPT (bits 0-3), C1h selects their addresses and
 // the parallel port mode (same encoding as the original BIOS).
 static void
@@ -271,7 +318,29 @@ superio_apply(void)
     outb(c1, SIO_DATA);
     outb(0x55, SIO_INDEX);
 }
+#endif
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static int
+onboard_ide(void)
+{
+    return pci_config_readw(IDE_BDF, PCI_VENDOR_ID) == 0x1045;
+}
+
+// MIDE: its I/O decode is the whole controller, 40h bit 3 turns the secondary channel off; PIO timings at their
+// slowest until the drives are found (a CPU-only reset keeps them).
+static void
+ide_channels_apply(void)
+{
+    if (!onboard_ide())
+        return;
+    u16 cmd = pci_config_readw(IDE_BDF, PCI_COMMAND) & ~PCI_COMMAND_IO;
+    pci_config_writew(IDE_BDF, PCI_COMMAND, cmd | (Setting[NB_IDE_PRIMARY] ? PCI_COMMAND_IO : 0));
+    u8 v = pci_config_readb(IDE_BDF, 0x40) & ~0x0b;
+    pci_config_writeb(IDE_BDF, 0x40, v | (Setting[NB_IDE_SECONDARY] ? 0 : 0x08));
+    pci_config_writeb(IDE_BDF, 0x43, 0);
+}
+#else
 static int
 onboard_ide(void)
 {
@@ -288,13 +357,15 @@ ide_channels_apply(void)
     v |= (Setting[NB_IDE_PRIMARY] ? 0x80 : 0) | (Setting[NB_IDE_SECONDARY] ? 0x40 : 0);
     pci_config_writeb(IDE_BDF, 0x41, v);
 }
+#endif
 
 // Drive 0-3 (primary master ... secondary slave) of the onboard controller (other boards: of the first two
 // channels), or -1.
 int
 setup_ide_index(int pci_bdf, int ataid, int slave)
 {
-    return ((!CONFIG_NEWBIOS_CHIPSET_UMC || pci_bdf == IDE_BDF) && ataid < 2) ? ataid * 2 + slave : -1;
+    return ((!(CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) || pci_bdf == IDE_BDF) && ataid < 2)
+        ? ataid * 2 + slave : -1;
 }
 
 static u8
@@ -315,6 +386,23 @@ setup_ide_pio(int idx, u16 *identify)
     return Setting[NB_IDE_PIO0 + idx] ? Setting[NB_IDE_PIO0 + idx] - 1 : ide_pio_max(identify);
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static u8 MideMode = 3;   // the slowest drive's PIO mode, at most 3
+
+// MIDE timings for one drive: 40h[1:0] is the cycle time of every drive (PIO 0-3: the slowest drive's), 43h two bits
+// per drive for PIO 4 (01), as the IBM BIOS sets them.
+void
+setup_ide_timing(int idx, u8 mode)
+{
+    if (!onboard_ide() || mode > 4)
+        return;
+    if (mode < MideMode)
+        MideMode = mode;
+    pci_config_writeb(IDE_BDF, 0x40, (pci_config_readb(IDE_BDF, 0x40) & ~3) | MideMode);
+    u8 e = pci_config_readb(IDE_BDF, 0x43) & ~(3 << 2 * idx);
+    pci_config_writeb(IDE_BDF, 0x43, e | (mode == 4) << 2 * idx);
+}
+#else
 // UM8886BF timings for one drive (the values of the coreboot_486 IDE driver for PIO 0-4).
 void
 setup_ide_timing(int idx, u8 mode)
@@ -330,6 +418,7 @@ setup_ide_timing(int idx, u8 mode)
     u8 c = pci_config_readb(IDE_BDF, 0x46 + chan) & ~(0xf << nib);
     pci_config_writeb(IDE_BDF, 0x46 + chan, c | tc[mode] << nib);
 }
+#endif
 
 // The onboard IDE positions by name, padded: in full and short.
 static const char * const IdeUnit[] = { "Primary Master  ", "Primary Slave   ", "Secondary Master", "Secondary Slave " };
@@ -490,7 +579,7 @@ setup_init(void)
     }
     cmos_write(Setting, Hdd, Password);
     floppy_motors_early((Setting[NB_FLOPPY_A] ? 1 : 0) | (Setting[NB_FLOPPY_B] ? 2 : 0));
-    if (CONFIG_NEWBIOS_CHIPSET_UMC)
+    if (CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
         superio_apply();
     ide_channels_apply();
     return Setting[NB_BOOT1] | Setting[NB_BOOT2] << 4 | Setting[NB_BOOT3] << 8
@@ -781,6 +870,11 @@ static const char * const Com1[] = { "Disabled", "COM1/3F8", "COM3/3E8" };
 static const char * const Com2[] = { "Disabled", "COM2/2F8", "COM4/2E8" };
 static const char * const Lpt[] = { "Disabled", "378H", "278H" };
 static const char * const LptMode[] = { "SPP", "EPP", "ECP" };
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static const char * const Com1[] = { "Disabled", "COM1/3F8", "COM3/3E8" };
+static const char * const Com2[] = { "Disabled", "COM2/2F8", "COM4/2E8" };
+static const char * const Lpt[] = { "Disabled", "3BCH", "378H", "278H" };
+static const char * const LptMode[] = { "Printer", "SPP", "EPP", "ECP" };
 #endif
 
 #define F_MANUAL 1   // editable only when chipset auto configuration is off
@@ -923,6 +1017,16 @@ static const struct item IoItems[] = {
     ENUM(9, 2, 30, NB_LPT, "Onboard Parallel Port     :", Lpt, 0),
     ENUM(10, 2, 30, NB_LPT_MODE, "Onboard Parallel Mode     :", LptMode, 0),
 };
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static const struct item IoItems[] = {
+    ENUM(4, 2, 30, NB_IDE_PRIMARY, "Onboard IDE Controller    :", OffOn, 0),
+    ENUM(5, 2, 30, NB_IDE_SECONDARY, "Onboard IDE Secondary     :", OffOn, 0),
+    ENUM(6, 2, 30, NB_FDC, "Onboard FDD Controller    :", OffOn, 0),
+    ENUM(7, 2, 30, NB_COM1, "Onboard Serial Port 1     :", Com1, 0),
+    ENUM(8, 2, 30, NB_COM2, "Onboard Serial Port 2     :", Com2, 0),
+    ENUM(9, 2, 30, NB_LPT, "Onboard Parallel Port     :", Lpt, 0),
+    ENUM(10, 2, 30, NB_LPT_MODE, "Onboard Parallel Mode     :", LptMode, 0),
+};
 #endif
 
 static const struct page Pages[] = {
@@ -933,7 +1037,7 @@ static const struct page Pages[] = {
 #endif
     [3] = { "POWER MANAGEMENT SETUP", PmItems, ARRAY_SIZE(PmItems), NULL },   // Menu's index in any case
     { "PNP/PCI CONFIGURATION", PciItems, ARRAY_SIZE(PciItems), NULL },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     { "INTEGRATED PERIPHERALS", IoItems, ARRAY_SIZE(IoItems), NULL },
 #endif
 };
@@ -2296,7 +2400,7 @@ static const struct {
 #endif
     { M_PAGE, 3, "POWER MANAGEMENT SETUP", "APM BIOS, HDD Standby Timer" },
     { M_PAGE, 4, "PNP/PCI CONFIGURATION", "PCI IRQ Routing, IDE PIO Modes" },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     { M_PAGE, 5, "INTEGRATED PERIPHERALS", "Onboard IDE, FDC, Serial and Parallel Ports" },
 #endif
     { M_PASSWORD, 0, "SUPERVISOR PASSWORD", "Change, Set, or Disable Password" },

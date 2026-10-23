@@ -209,6 +209,8 @@ lpt_setup(void)
     dprintf(3, "init lpt\n");
 
     u16 count = 0;
+    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)  // the IBM Aptiva's parallel port: at 3BCh, as its BIOS sets it
+        count += detect_parport(0x3bc, 0x14, count);
     count += detect_parport(PORT_LPT1, 0x14, count);
     count += detect_parport(PORT_LPT2, 0x14, count);
     dprintf(3, "Found %d lpt ports\n", count);
