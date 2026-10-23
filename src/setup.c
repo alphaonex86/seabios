@@ -1470,8 +1470,6 @@ cpu_mhz(void)
     return ticks ? (954400000 / ticks + 500) / 1000 : 0;   // 800000 clocks * 1.193 MHz
 }
 
-// Core/bus clock ratio from the CPU (as coreboot's newbios.c, whose timings follow it): the multiplier pins are not
-// readable. Am5x86: 4x when only 4x gives a standard bus (133 = 4 x 33), else 3x; DX2 above 85 MHz are DX4s.
 #if CONFIG_NEWBIOS_TOOL_INFO_CPU && CPU_P5
 // Aptiva: the bus clock in 0.1 MHz by jumper JP2 (FDC37C93x GP21-GP20 at index 2 of the GPIO port EAh/EBh, which
 // coreboot enabled), 0 if not a known setting.
@@ -1484,6 +1482,8 @@ board_bus10(void)
 }
 #endif
 
+// Core/bus clock ratio from the CPU (as coreboot's newbios.c, whose timings follow it): the multiplier pins are not
+// readable. Am5x86: 4x when only 4x gives a standard bus (133 = 4 x 33), else 3x; DX2 above 85 MHz are DX4s.
 #if CONFIG_NEWBIOS_TOOL_INFO_CPU
 static int
 standard_bus(u32 mhz, u32 m)
@@ -1687,6 +1687,9 @@ pci_vendor(u16 v)
         { 0x10b7, "3Com" }, { 0x1011, "DEC" }, { 0x121a, "3dfx" }, { 0x1274, "Ensoniq" },
         { 0x10b9, "ALi" }, { 0x1039, "SiS" }, { 0x1106, "VIA" }, { 0x1095, "CMD" },
         { 0x105a, "Promise" }, { 0x1102, "Creative" }, { 0x104c, "TI" }, { 0x100b, "NatSemi" },
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+        { 0x1045, "OPTi" },
+#endif
     };
     int i;
     for (i = 0; i < ARRAY_SIZE(t); i++)
