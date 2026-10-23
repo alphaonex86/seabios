@@ -163,17 +163,18 @@ make_bios_readonly_finali(void)
 }
 
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
 // OPTi Viper-M 82C557M, index 22h, data 24h: 04h-06h hold a field per shadow segment, bit 0 reads from DRAM, bit 1
 // writes to it: 04h C0000-C7FFF (bits 1:0), C8000 (5:4), CC000 (7:6); 05h D0000-DFFFF by 16 KiB; 06h E0000, F0000.
 
-static u8
+u8
 viperm_read(u8 index)
 {
 	outb(index, 0x22);
 	return inb(0x24);
 }
 
-static void
+void
 viperm_write(u8 index, u8 value)
 {
 	outb(index, 0x22);
@@ -200,6 +201,7 @@ viperm_isa_block(u32 addr, int isa)
 	viperm_write(index, (viperm_read(index) & ~(3 << shift)) | (isa ? 0 : 3 << shift));
 	wbinvd();
 }
+#endif
 
 
 //UMC HB4
@@ -235,8 +237,9 @@ shadow_isa_block(u32 addr, int isa)
 		return;
 	if (CONFIG_NEWBIOS_CHIPSET_UMC)
 		umc_isa_block(addr, isa);
-	if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
-		viperm_isa_block(addr, isa);
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+	viperm_isa_block(addr, isa);
+#endif
 }
 
 static void make_bios_readonly_umc(void);
@@ -251,8 +254,9 @@ shadow_isa_writes(int isa)
 		else
 			make_bios_writable_umc();
 	}
-	if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
-		viperm_shadow_writes(!isa);
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+	viperm_shadow_writes(!isa);
+#endif
 }
 
 static void
@@ -286,10 +290,10 @@ make_bios_writable(void)
         make_bios_writable_umc();
         return;
     }
-    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) {
-        viperm_shadow_writes(1);
-        return;
-    }
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    viperm_shadow_writes(1);
+    return;
+#endif
 
     // At this point, statically allocated variables can't be written,
     // so do this search manually.
@@ -326,10 +330,10 @@ make_bios_readonly(void)
             make_bios_readonly_umc();
         return;
     }
-    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) {
-        viperm_shadow_writes(0);
-        return;
-    }
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    viperm_shadow_writes(0);
+    return;
+#endif
 
     if (ShadowBDF < 0) {
         dprintf(1, "Unable to lock ram - bridge not found\n");

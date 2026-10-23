@@ -52,6 +52,9 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_SLOW_REFRESH] = 1,
 #elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     [NB_COM2] = 1,                              // over the value above: COM2 at 2F8h, as the IBM BIOS sets it
+    // manual chipset values: the IBM BIOS's at 60/66 MHz (NB_VIPERM_FIELDS)
+    [NB_DRAM_READ_WS] = 1, [NB_DRAM_WRITE_WS] = 1, [NB_L2_WS] = 1, [NB_HOST_PCI_CLOCK] = 1, [NB_PCI_POSTED_WRITE] = 1,
+    [NB_BURST_COPYBACK] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1,
 #endif
 };
 
@@ -570,7 +573,8 @@ setup_init(void)
         int fails = rtc_read(NB_CMOS_BOOTFAIL) - 1;   // coreboot counted this POST already
         if (fails > 0)
             PrevPostCode = PrevLastPost;
-        if (CONFIG_NEWBIOS_CHIPSET_UMC && !Setting[NB_CHIPSET_AUTO] && fails >= NB_BOOTFAIL_MAX)
+        if ((CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) && !Setting[NB_CHIPSET_AUTO]
+            && fails >= NB_BOOTFAIL_MAX)
             ChipsetFallback = fails;                   // coreboot used the chipset defaults
     } else {
         dprintf(1, "CMOS settings invalid - defaults loaded\n");
@@ -582,6 +586,11 @@ setup_init(void)
     if (CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
         superio_apply();
     ide_channels_apply();
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    // caching of the video BIOS (C0000-C7FFF, 06h bit 5) and the system BIOS (F0000-FFFFF, bit 4)
+    viperm_write(0x06, (viperm_read(0x06) & ~0x30) | Setting[NB_VIDBIOS_CACHE] << 5 | Setting[NB_SYSBIOS_CACHE] << 4);
+    wbinvd();
+#endif
     return Setting[NB_BOOT1] | Setting[NB_BOOT2] << 4 | Setting[NB_BOOT3] << 8
         | Setting[NB_BOOT4] << 12;
 }
@@ -861,9 +870,18 @@ static const char * const Standby[] = {
     "Disabled", "1 Min", "2 Min", "3 Min", "4 Min", "5 Min", "6 Min", "7 Min", "8 Min",
     "9 Min", "10 Min", "11 Min", "12 Min", "13 Min", "14 Min", "15 Min"
 };
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static const char * const Irq[] = {                  // those the 82C558M can route
+    "Auto", "", "", "", "", "5", "", "", "", "9", "10", "11", "12", "", "14", "15"
+};
+static const char * const Clk3[] = { "3 CLKs", "2 CLKs" };
+static const char * const Clk6[] = { "6 CLKs", "5 CLKs", "4 CLKs", "3 CLKs" };
+static const char * const Clk7[] = { "7 CLKs", "6 CLKs", "5 CLKs", "4 CLKs" };
+#else
 static const char * const Irq[] = {
     "Auto", "", "", "3", "4", "5", "", "7", "", "9", "10", "11", "12", "", "14", "15"
 };
+#endif
 static const char * const Pio[] = { "Auto", "Mode 0", "Mode 1", "Mode 2", "Mode 3", "Mode 4" };
 #if CONFIG_NEWBIOS_CHIPSET_UMC
 static const char * const Com1[] = { "Disabled", "COM1/3F8", "COM3/3E8" };
@@ -987,6 +1005,19 @@ static const struct item ChipItems[] = {
     ENUM(6, 42, 68, NB_PREEMPT_PCI, "Preempt PCI Master      :", OffOn, F_MANUAL),
     ENUM(7, 42, 68, NB_DEVSEL, "IBC DEVSEL# Decoding    :", Devsel, F_MANUAL),
 };
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+static const struct item ChipItems[] = {        // the settings of NB_VIPERM_FIELDS, coreboot applies them
+    ENUM(4, 2, 29, NB_CHIPSET_AUTO, "Auto Configuration       :", OffOn, 0),
+    ENUM(6, 2, 29, NB_L2_WS, "DRAM RAS# Precharge      :", Clk6, F_MANUAL),
+    ENUM(7, 2, 29, NB_DRAM_READ_WS, "DRAM Read CAS# Pulse     :", Clk3, F_MANUAL),
+    ENUM(8, 2, 29, NB_DRAM_WRITE_WS, "DRAM Write CAS# Pulse    :", Clk3, F_MANUAL),
+    ENUM(9, 2, 29, NB_HOST_PCI_CLOCK, "Refresh RAS# Pulse       :", Clk7, F_MANUAL),
+    ENUM(10, 2, 29, NB_SLOW_REFRESH, "Slow Refresh (1/4 Freq)  :", OffOn, F_MANUAL),
+    ENUM(11, 2, 29, NB_PCI_POSTED_WRITE, "DRAM Posted Write        :", OffOn, F_MANUAL),
+    ENUM(12, 2, 29, NB_BURST_COPYBACK, "CPU Address Pipelining   :", OffOn, F_MANUAL),
+    ENUM(14, 2, 29, NB_SYSBIOS_CACHE, "System BIOS Cacheable    :", OffOn, 0),
+    ENUM(15, 2, 29, NB_VIDBIOS_CACHE, "Video  BIOS Cacheable    :", OffOn, 0),
+};
 #endif
 
 static const struct item PmItems[] = {
@@ -1032,7 +1063,7 @@ static const struct item IoItems[] = {
 static const struct page Pages[] = {
     { "STANDARD CMOS SETUP", StdItems, ARRAY_SIZE(StdItems), draw_std },
     { "BIOS FEATURES SETUP", BiosItems, ARRAY_SIZE(BiosItems), NULL },
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     { "CHIPSET FEATURES SETUP", ChipItems, ARRAY_SIZE(ChipItems), NULL },
 #endif
     [3] = { "POWER MANAGEMENT SETUP", PmItems, ARRAY_SIZE(PmItems), NULL },   // Menu's index in any case
@@ -1215,6 +1246,8 @@ static const struct { u8 var, value; } FailSafe[] = {
 #if CONFIG_NEWBIOS_CHIPSET_UMC
     { NB_SYSBIOS_CACHE, 0 }, { NB_VIDBIOS_CACHE, 0 }, { NB_SLOW_REFRESH, 0 },
     { NB_PCI_POSTED_WRITE, 0 }, { NB_COM2, 1 }, { NB_LPT_MODE, 2 },
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    { NB_SYSBIOS_CACHE, 0 }, { NB_VIDBIOS_CACHE, 0 },
 #endif
 };
 
@@ -1516,6 +1549,30 @@ info_simms(int row)
     info_printf(row + 1, "SIMM3 / SIMM4  : %s / %s", simm[2], simm[3]);
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+// DRAM timing (01h) and the SIMM pairs as coreboot set their banks: J23/J24 RAS0#/RAS1# (13h), J27/J28 RAS2#/RAS3#
+// (14h), each side a 64-bit bank of 1 << code MB on the two SIMMs.
+static void
+info_viperm(int row, u32 bus)
+{
+    u8 r01 = viperm_read(0x01);
+    info_printf(row++, "DRAM timing    : at %d MHz (bus), RAS# precharge %d, CAS# read %d, write %d CLKs", bus,
+                6 - (r01 & 3), 3 - (r01 >> 3 & 1), 3 - (r01 >> 2 & 1));
+    for (int pair = 0; pair < 2; pair++) {
+        u8 banks = viperm_read(0x13 + pair), side0 = banks & 7, side1 = banks >> 4 & 7;
+        const char *name = pair ? "J27/J28" : "J23/J24";
+        if (side0 || side1)
+            info_printf(row++, "SIMM %s   : 2 x %d MB %s-sided", name,
+                        ((side0 ? 1 << side0 : 0) + (side1 ? 1 << side1 : 0)) / 2,
+                        side0 && side1 ? "double" : "single");
+        else
+            info_printf(row++, "SIMM %s   : not used", name);
+    }
+    info_printf(row + 1, "Chipset        : OPTi 82C557M rev %x, 82C558M rev %x, SMC FDC37C93x",
+                pci_config_readb(HB_BDF, PCI_REVISION_ID), pci_config_readb(IBC_BDF, PCI_REVISION_ID));
+}
+#endif
+
 static void
 info_cpu(void)
 {
@@ -1604,6 +1661,9 @@ info_cpu(void)
     u32 extkb = ext_mem_kb();
     info_printf(row++, "DRAM           : %d KB (base %d KB, extended %d KB)", extkb + 1024, GET_BDA(mem_size_kb),
                 extkb);
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    info_viperm(row, bus);
+#endif
     if (!CONFIG_NEWBIOS_CHIPSET_UMC)
         return;
     info_printf(row++, "DRAM timing    : at %d MHz (bus), %s, read %d WS, write %d WS", bus,
@@ -1838,6 +1898,54 @@ info_regs(const char *name, u16 bdf, int first, int rows, int row)
     }
 }
 
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+// The CHIPSET FEATURES options as the 82C557M has them (with Auto Configuration: coreboot's), the shadow segments,
+// then the registers: 82C557M index 00-1Fh, 82C558M and MIDE configuration space, the FDC37C93x logical devices.
+static void
+info_chipset(void)
+{
+    static const struct nb_field fields[] = { NB_VIPERM_FIELDS };
+    static const char * const shadow[] = { "ISA", "RO", "WO", "RW" };   // read DRAM bit 0, write DRAM bit 1
+    char line[80], *p;
+    for (int i = 0; i < ARRAY_SIZE(fields); i++) {
+        const struct nb_field *f = &fields[i];
+        const struct item *it = ChipItems;
+        while (it->var != f->setting)
+            it++;
+        u8 bits = viperm_read(f->reg) & f->mask;
+        int v = 0;
+        while (v < f->count && f->value[v] != bits)
+            v++;
+        int row = 3 + i / 2, col = i % 2 ? 41 : 3;
+        scr_puts(row, col, AttrText, it->label);
+        scr_puts(row, col + 27, AttrText, v < f->count ? it->names[v] : "?");
+    }
+    u8 r04 = viperm_read(0x04), r05 = viperm_read(0x05), r06 = viperm_read(0x06);
+    p = line + snprintf(line, sizeof(line), "Shadow   : C0000 %s, C8000-DFFFF", shadow[r04 & 3]);
+    for (int b = 0; b < 6; b++)
+        p += snprintf(p, line + sizeof(line) - p, " %s", shadow[(b < 2 ? r04 >> (4 + 2 * b) : r05 >> (2 * b - 4)) & 3]);
+    snprintf(p, line + sizeof(line) - p, ", E0000 %s, F0000 %s", shadow[r06 & 3], shadow[r06 >> 2 & 3]);
+    info_printf(7, "%s", line);
+    for (int r = 0; r < 2; r++) {
+        p = line + snprintf(line, sizeof(line), "82C557M  index %02x:", r * 16);
+        for (int i = 0; i < 16; i++)
+            p += snprintf(p, line + sizeof(line) - p, " %02X", viperm_read(r * 16 + i));
+        info_printf(9 + r, "%s", line);
+    }
+    info_regs("82C558M  00:01.0", IBC_BDF, 0x40, 2, 11);
+    info_regs("MIDE     00:14.0", IDE_BDF, 0x40, 1, 13);
+    outb(0x55, SIO_INDEX);
+    outb(0x55, SIO_INDEX);
+    for (int i = 0; i < 7; i++) {
+        static const u8 lds[7] = { 0, 3, 4, 5, 6, 7, 8 };
+        sio_write(0x07, lds[i]);
+        scr_printf(15 + i / 2, 3 + i % 2 * 38, AttrText, "FDC37C93x LD%d: %02X %02X%02X %02X %02X %02X", lds[i],
+                   sio_read(0x30), sio_read(0x60), sio_read(0x61), sio_read(0x70), sio_read(0x74), sio_read(0xf0));
+    }
+    outb(0xaa, SIO_INDEX);
+    info_printf(19, "(30h activate, 60h-61h I/O base, 70h IRQ, 74h DMA, F0h mode)");
+}
+#else
 // The CHIPSET FEATURES options as the chip has them (with Auto Configuration: coreboot's values; the timings are on
 // the CPU page), which C8000-DFFFF blocks are shadow RAM, then the registers.
 static void
@@ -1874,6 +1982,7 @@ info_chipset(void)
     outb(0x55, SIO_INDEX);
     info_printf(20, "UM8663BF super I/O   C0: %02X  C1: %02X", c0, c1);
 }
+#endif
 #endif
 
 /****************************************************************
@@ -2397,6 +2506,8 @@ static const struct {
 #endif
 #if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_PAGE, 2, "CHIPSET FEATURES SETUP", "DRAM and Cache Timing (Auto Configuration)" },
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    { M_PAGE, 2, "CHIPSET FEATURES SETUP", "DRAM Timing (Auto Configuration), BIOS Caching" },
 #endif
     { M_PAGE, 3, "POWER MANAGEMENT SETUP", "APM BIOS, HDD Standby Timer" },
     { M_PAGE, 4, "PNP/PCI CONFIGURATION", "PCI IRQ Routing, IDE PIO Modes" },

@@ -87,4 +87,14 @@ struct nb_field {
 	{ NB_PREEMPT_PCI,       1, 0x46, 0x10, 2, { 0x10, 0x00 } }, \
 	{ NB_KBC_CLOCK,         1, 0x56, 0x0c, 4, { 0x00, 0x04, 0x08, 0x0c } },	/* 7.16 MHz, PCICLK/4 /3 /2 */
 
+/* The same settings on the OPTi Viper-M of the IBM Aptiva 2168: 82C557M index registers (reg; ibc unused) */
+#define NB_VIPERM_FIELDS \
+	{ NB_L2_WS,             0, 0x01, 0x03, 4, { 0x00, 0x01, 0x02, 0x03 } },	/* RAS# precharge 6..3 CLKs */ \
+	{ NB_DRAM_READ_WS,      0, 0x01, 0x08, 2, { 0x00, 0x08 } },	/* CAS# read pulse 3, 2 CLKs */ \
+	{ NB_DRAM_WRITE_WS,     0, 0x01, 0x04, 2, { 0x00, 0x04 } },	/* CAS# write pulse 3, 2 CLKs */ \
+	{ NB_HOST_PCI_CLOCK,    0, 0x01, 0x30, 4, { 0x00, 0x10, 0x20, 0x30 } },	/* refresh RAS# pulse 7..4 CLKs */ \
+	{ NB_SLOW_REFRESH,      0, 0x12, 0x0c, 2, { 0x00, 0x08 } },	/* refresh on each REFRESH#, 1 in 4 */ \
+	{ NB_PCI_POSTED_WRITE,  0, 0x02, 0x02, 2, { 0x00, 0x02 } },	/* DRAM posted write */ \
+	{ NB_BURST_COPYBACK,    0, 0x08, 0x04, 2, { 0x00, 0x04 } },	/* CPU address pipelining */
+
 #endif

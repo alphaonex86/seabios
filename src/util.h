@@ -191,6 +191,10 @@ void make_bios_readonly(void);
 void qemu_reboot(void);
 void shadow_isa_block(u32 addr, int isa);
 void shadow_isa_writes(int isa);
+#if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+u8 viperm_read(u8 index);
+void viperm_write(u8 index, u8 value);
+#endif
 
 // fw/smbios.c
 void smbios_legacy_setup(void);

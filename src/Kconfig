@@ -114,7 +114,7 @@ menu "Setup utility tools"
         bool "IDE DRIVES page"
         default y
     config NEWBIOS_TOOL_CHIPSET_REGS
-        depends on NEWBIOS_CHIPSET_UMC
+        depends on NEWBIOS_CHIPSET_UMC || NEWBIOS_CHIPSET_OPTI_VIPERM
         bool "CHIPSET REGISTERS page"
         default y
     config NEWBIOS_TOOL_BENCH_MEMORY
