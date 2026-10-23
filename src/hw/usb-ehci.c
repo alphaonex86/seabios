@@ -10,6 +10,7 @@
 #include "malloc.h" // free
 #include "memmap.h" // PAGE_SIZE
 #include "pcidevice.h" // foreachpci
+#include "pci.h" // pci_config_writeb
 #include "pci_ids.h" // PCI_CLASS_SERIAL_USB_UHCI
 #include "pci_regs.h" // PCI_BASE_ADDRESS_0
 #include "string.h" // memset
@@ -344,6 +345,10 @@ ehci_controller_setup(struct pci_device *pci)
             return;
         }
     }
+
+    // The VT6212 walks its async schedule every 1 us and starves the CPU (Linux ehci-pci.c): 4Bh bit 5, 10 us
+    if (pci->vendor == PCI_VENDOR_ID_VIA && pci->device == 0x3104 && (pci->revision & 0xf0) == 0x60)
+        pci_config_writeb(pci->bdf, 0x4b, pci_config_readb(pci->bdf, 0x4b) | 0x20);
 
     pci_enable_busmaster(pci);
 
