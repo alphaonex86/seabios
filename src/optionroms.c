@@ -52,12 +52,12 @@ __callrom(struct rom_header *rom, u16 offset, u16 bdf)
     // ISA ROM cards may have RAM in their window: send shadow-area writes to the bus meanwhile.
     int isa = (u32)rom >= IsaRomStart && (u32)rom < IsaRomEnd;
     if (isa)
-        umc_isa_writes(1);
+        shadow_isa_writes(1);
     start_preempt();
     farcall16big(&br);
     finish_preempt();
     if (isa)
-        umc_isa_writes(0);
+        shadow_isa_writes(0);
 
 //dprintf(1, "after option rom\n");
 }
@@ -436,10 +436,10 @@ isa_roms_setup(void)
     u32 start = ALIGN(rom_get_last(), ISA_ROM_BLOCK), end = start, addr;
     void *copy = CONFIG_SETUP_MENU ? malloc_tmphigh(ISA_ROM_BLOCK) : NULL;
     for (addr = start; addr < ISA_ROM_END; addr += ISA_ROM_BLOCK) {
-        umc_isa_block(addr, 1);
+        shadow_isa_block(addr, 1);
         if (copy && setup_isa_shadow(addr)) {   // "Shadow" in setup: run a copy from RAM
             memcpy(copy, (void*)addr, ISA_ROM_BLOCK);
-            umc_isa_block(addr, 0);
+            shadow_isa_block(addr, 0);
             memcpy((void*)addr, copy, ISA_ROM_BLOCK);
         }
     }
@@ -461,7 +461,7 @@ isa_roms_setup(void)
     }
     end = ALIGN(end, ISA_ROM_BLOCK);
     for (addr = end; addr < ISA_ROM_END; addr += ISA_ROM_BLOCK)
-        umc_isa_block(addr, 0);
+        shadow_isa_block(addr, 0);
     if (end != start)
         rom_set_last(end);
     IsaRomStart = start;
@@ -551,7 +551,7 @@ dprintf(3, "post pnp\n");
     // Unused blocks go back to the ISA bus, like the original BIOS: cards with shared memory there.
     u32 addr;
     for (addr = ALIGN(rom_get_last(), ISA_ROM_BLOCK); addr < ISA_ROM_END; addr += ISA_ROM_BLOCK)
-        umc_isa_block(addr, 1);
+        shadow_isa_block(addr, 1);
 }
 
 

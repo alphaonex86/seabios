@@ -862,7 +862,7 @@ static const struct item BiosItems[] = {
     ENUM(16, 2, 31, NB_SECURITY, "Security Option            :", Security, 0),
     ENUM(17, 2, 31, NB_QUICK_POST, "Quick Power On Self Test   :", OffOn, 0),
     ENUM(18, 2, 31, NB_IDE_BLOCK, "IDE HDD Block Mode         :", OffOn, 0),
-#if CONFIG_NEWBIOS_CHIPSET_UMC
+#if CONFIG_NEWBIOS_CHIPSET_UMC || CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     ENUM(4, 45, 68, NB_SHADOW_C8, "C8000-CBFFF Shadow   :", OffOn, 0),
     ENUM(5, 45, 68, NB_SHADOW_CC, "CC000-CFFFF Shadow   :", OffOn, 0),
     ENUM(6, 45, 68, NB_SHADOW_D0, "D0000-D3FFF Shadow   :", OffOn, 0),
@@ -2286,6 +2286,8 @@ static const struct {
     { M_PAGE, 0, "STANDARD CMOS SETUP", "Time, Date, Hard Disk Type, Floppy..." },
 #if CONFIG_NEWBIOS_CHIPSET_UMC
     { M_PAGE, 1, "BIOS FEATURES SETUP", "Caches, Boot Sequence, Keyboard, Shadow..." },
+#elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
+    { M_PAGE, 1, "BIOS FEATURES SETUP", "Cache, Boot Sequence, Keyboard, Shadow..." },
 #else
     { M_PAGE, 1, "BIOS FEATURES SETUP", "Cache, Boot Sequence, Keyboard..." },
 #endif
@@ -4300,11 +4302,11 @@ bt_isa_mem(void)
     }
     u32 flags = save_flags();
     irq_disable();
-    umc_isa_writes(1);
+    shadow_isa_writes(1);
     for (int u = 0; u < 48; u++)
         if (!(hb54 >> (2 + u / 8) & 1) && !unit[u] && isa_ram_at((void *)(0xc8000 + u * 2048)))
             unit[u] = 2;
-    umc_isa_writes(0);
+    shadow_isa_writes(0);
     restore_flags(flags);
     for (int u = 0; u < 48; u++) {
         if (unit[u] != 2)
@@ -4315,9 +4317,9 @@ bt_isa_mem(void)
         u32 s = 0xc8000 + u * 2048, e = 0xc8000 + v * 2048, first = 0;
         flags = save_flags();
         irq_disable();
-        umc_isa_writes(1);
+        shadow_isa_writes(1);
         u32 bad = bus_ram_test(s, e, &first);
-        umc_isa_writes(0);
+        shadow_isa_writes(0);
         restore_flags(flags);
         if (bad)
             snprintf(line, sizeof(line), "ISA RAM      : %x-%x (%dK): bits %08x wrong, first at %x", s, e - 1,

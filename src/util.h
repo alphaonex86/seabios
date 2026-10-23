@@ -189,8 +189,8 @@ void pirtable_setup(void);
 void make_bios_writable(void);
 void make_bios_readonly(void);
 void qemu_reboot(void);
-void umc_isa_block(u32 addr, int isa);
-void umc_isa_writes(int isa);
+void shadow_isa_block(u32 addr, int isa);
+void shadow_isa_writes(int isa);
 
 // fw/smbios.c
 void smbios_legacy_setup(void);

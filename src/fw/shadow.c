@@ -163,6 +163,45 @@ make_bios_readonly_finali(void)
 }
 
 
+// OPTi Viper-M 82C557M, index 22h, data 24h: 04h-06h hold a field per shadow segment, bit 0 reads from DRAM, bit 1
+// writes to it: 04h C0000-C7FFF (bits 1:0), C8000 (5:4), CC000 (7:6); 05h D0000-DFFFF by 16 KiB; 06h E0000, F0000.
+
+static u8
+viperm_read(u8 index)
+{
+	outb(index, 0x22);
+	return inb(0x24);
+}
+
+static void
+viperm_write(u8 index, u8 value)
+{
+	outb(index, 0x22);
+	outb(value, 0x24);
+}
+
+// Writes go to DRAM in every segment read from it (writable) or to the bus (read-only): per segment, unlike the UMC.
+static void
+viperm_shadow_writes(int dram)
+{
+	static const u8 reads[3] = { 0x51, 0x55, 0x05 };   // the read bits of 04h, 05h, 06h
+	wbinvd();
+	for (int i = 0; i < 3; i++) {
+		u8 v = viperm_read(0x04 + i) & ~(reads[i] << 1);
+		viperm_write(0x04 + i, v | (dram ? (v & reads[i]) << 1 : 0));
+	}
+}
+
+static void
+viperm_isa_block(u32 addr, int isa)
+{
+	u8 index = addr < 0xd0000 ? 0x04 : 0x05;
+	int shift = addr < 0xd0000 ? 4 + (addr - 0xc8000) / 0x2000 : (addr - 0xd0000) / 0x2000;
+	viperm_write(index, (viperm_read(index) & ~(3 << shift)) | (isa ? 0 : 3 << shift));
+	wbinvd();
+}
+
+
 //UMC HB4
 
 static void
@@ -177,12 +216,9 @@ make_bios_writable_umc(void)
 	pci_config_writeb(bdf, 0x55, val);
 }
 
-// Route reads of the 16 KiB block at addr (C8000-DFFFF) to the ISA bus or to shadow RAM (UMC only).
-void
+static void
 umc_isa_block(u32 addr, int isa)
 {
-	if (!CONFIG_NEWBIOS_CHIPSET_UMC || addr < 0xc8000 || addr >= 0xe0000)
-		return;
 	const u16 bdf = pci_to_bdf(0, 0x10, 0);
 	const u8 bit = 1 << (2 + (addr - 0xc8000) / 0x4000);
 	u8 val = pci_config_readb(bdf, 0x54);
@@ -191,18 +227,32 @@ umc_isa_block(u32 addr, int isa)
 	wbinvd();
 }
 
+// Route reads of the 16 KiB block at addr (C8000-DFFFF) to the ISA bus or to shadow RAM (writable).
+void
+shadow_isa_block(u32 addr, int isa)
+{
+	if (addr < 0xc8000 || addr >= 0xe0000)
+		return;
+	if (CONFIG_NEWBIOS_CHIPSET_UMC)
+		umc_isa_block(addr, isa);
+	if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
+		viperm_isa_block(addr, isa);
+}
+
 static void make_bios_readonly_umc(void);
 
-// Send shadow-area writes to the ISA bus (RAM on ISA ROM cards) or to shadow RAM (UMC only).
+// Send shadow-area writes to the ISA bus (RAM on ISA ROM cards) or to shadow RAM.
 void
-umc_isa_writes(int isa)
+shadow_isa_writes(int isa)
 {
-	if (!CONFIG_NEWBIOS_CHIPSET_UMC)
-		return;
-	if (isa)
-		make_bios_readonly_umc();
-	else
-		make_bios_writable_umc();
+	if (CONFIG_NEWBIOS_CHIPSET_UMC) {
+		if (isa)
+			make_bios_readonly_umc();
+		else
+			make_bios_writable_umc();
+	}
+	if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM)
+		viperm_shadow_writes(!isa);
 }
 
 static void
@@ -234,6 +284,10 @@ make_bios_writable(void)
 {
     if (CONFIG_NEWBIOS_CHIPSET_UMC) {
         make_bios_writable_umc();
+        return;
+    }
+    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) {
+        viperm_shadow_writes(1);
         return;
     }
 
@@ -270,6 +324,10 @@ make_bios_readonly(void)
         // stack and RW variables in upper memory need it writable
         if (!CONFIG_MALLOC_UPPERMEMORY)
             make_bios_readonly_umc();
+        return;
+    }
+    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM) {
+        viperm_shadow_writes(0);
         return;
     }
 
