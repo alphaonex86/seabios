@@ -68,6 +68,7 @@ static const u8 Defaults[NB_COUNT] = {
 #define HB_BDF    pci_to_bdf(0, 0x10, 0)
 #define IBC_BDF   pci_to_bdf(0, 0x12, 0)
 #define IDE_BDF   pci_to_bdf(0, 0x12, 1)
+#define CPU_P5    CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM   // Socket 7: Pentium names, clock by the TSC
 
 
 /****************************************************************
@@ -1212,12 +1213,16 @@ static const char *
 cpu_name(const char *vendor, u32 fms, int *mhz_valid)
 {
     int fam = (fms >> 8) & 0xf, model = (fms >> 4) & 0xf;
-    *mhz_valid = fam == 4;
+    *mhz_valid = fam == 4 || (CPU_P5 && fam == 5);
     if (!strcmp(vendor, "GenuineIntel")) {
         static const char * const n[] = { "486DX", "486DX", "486SX", "486DX2", "486SL", "486SX2",
                                           "486", "486DX2-WB", "486DX4", "486DX4-WB" };
         if (fam == 4)
             return model < ARRAY_SIZE(n) ? n[model] : "486";
+#if CPU_P5
+        if (fam == 5 && model != 3)
+            return model == 4 || model == 8 ? "Pentium MMX" : "Pentium";
+#endif
         if (fam == 5)
             return "Pentium OverDrive";
     }
@@ -1282,11 +1287,37 @@ cpu_cyrix_dir0(void)
     return inb(0x23);
 }
 
+// Pentium core clock: TSC clocks over 65535 ticks of PIT channel 2 (55 ms, mode 0: OUT2 rises at the end), shown
+// as the CPU's rating (75-200 MHz) when within 2% of it.
+static u32
+cpu_mhz_tsc(void)
+{
+    static const u8 rating[] = { 75, 90, 100, 120, 133, 150, 166, 200 };
+    u32 flags = save_flags();
+    irq_disable();
+    outb((inb(0x61) & ~0x02) | 0x01, 0x61);
+    outb(0xb0, 0x43);
+    outb(0xff, 0x42);
+    outb(0xff, 0x42);
+    u32 start = rdtscll();
+    while (!(inb(0x61) & 0x20))
+        ;
+    u32 clocks = (u32)rdtscll() - start;
+    restore_flags(flags);
+    u32 mhz = (clocks + 27462) / 54925;                    // 65535 / 1.193182 MHz = 54925 us
+    for (int i = 0; i < ARRAY_SIZE(rating); i++)
+        if (mhz * 50 >= rating[i] * 49 && mhz * 50 <= rating[i] * 51)
+            return rating[i];
+    return mhz;
+}
+
 // Core clock of 486-class CPUs: dec + taken jnz is 4 clocks, timed with PIT channel 2; 16-byte aligned
 // (unaligned it took 4-5 clocks: 107-121 MHz shown on the 133 MHz board).
 static u32
 cpu_mhz(void)
 {
+    if (CPU_P5)
+        return cpu_mhz_tsc();
     u32 n = 200000, flags = save_flags();
     irq_disable();
     outb((inb(0x61) & ~0x02) | 0x01, 0x61);
@@ -1304,6 +1335,18 @@ cpu_mhz(void)
 
 // Core/bus clock ratio from the CPU (as coreboot's newbios.c, whose timings follow it): the multiplier pins are not
 // readable. Am5x86: 4x when only 4x gives a standard bus (133 = 4 x 33), else 3x; DX2 above 85 MHz are DX4s.
+#if CONFIG_NEWBIOS_TOOL_INFO_CPU && CPU_P5
+// Aptiva: the bus clock in 0.1 MHz by jumper JP2 (FDC37C93x GP21-GP20 at index 2 of the GPIO port EAh/EBh, which
+// coreboot enabled), 0 if not a known setting.
+static u32
+board_bus10(void)
+{
+    static const u16 bus10[4] = { 667, 0, 600, 500 };
+    outb(0x02, 0xea);
+    return bus10[inb(0xeb) & 3];
+}
+#endif
+
 #if CONFIG_NEWBIOS_TOOL_INFO_CPU
 static int
 standard_bus(u32 mhz, u32 m)
@@ -1410,8 +1453,17 @@ info_cpu(void)
     }
     u32 pci10 = a4 == 1 ? bus10 : a4 == 2 ? bus10 * 2 / 3 : bus10 / 2;   // host:PCI 1:1, 2/3, 1/2
     info_printf(row++, "Core clock     : %d MHz (measured)", mhz);
-    info_printf(row++, "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)", bus10 / 10,
-                bus10 % 10, mult);
+#if CPU_P5
+    if (board_bus10()) {                               // the bus by its jumper, the multiplier from both
+        bus10 = board_bus10();
+        bus = (bus10 + 5) / 10;
+        u32 halves = (mhz * 20 + bus10 / 2) / bus10;
+        info_printf(row++, "Bus clock (FSB): %d.%d MHz (jumper JP2) = core / %d.%d", bus10 / 10, bus10 % 10,
+                    halves / 2, halves % 2 * 5);
+    } else
+#endif
+        info_printf(row++, "Bus clock (FSB): %d.%d MHz = core / %d (multiplier by CPU type: detected)", bus10 / 10,
+                    bus10 % 10, mult);
     if (CONFIG_NEWBIOS_CHIPSET_UMC) {
         if (i56 < 2)
             snprintf(line, sizeof(line), "PCI / ISA clock: %d.%d MHz (host:PCI %s) / %d.%d MHz (PCICLK/%d)", pci10 / 10,
