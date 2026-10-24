@@ -88,14 +88,133 @@ handle_155306(struct bregs *regs)
     set_success(regs);
 }
 
+#if CONFIG_NEWBIOS_BOARD_APTIVA2168
+// The Aptiva's power microcontroller at ECh (data) and EDh (bit 0: ready, it toggles), chip select from the FDC37C93x
+// GP14 decoder; protocol as the IBM BIOS (runtime F000:5FB8-62BB, soft off 5405), command meanings inferred from it.
+#define PMC_DATA   0xec
+#define PMC_STATUS 0xed
+
+// Refresh toggles of port 61h bit 4, 15 us each (IBM F000:5B0A); each wait given up after 100 reads
+static void
+refresh_wait(u32 toggles)
+{
+    while (toggles--) {
+        u8 last = inb(0x61) & 0x10;
+        int i;
+        for (i = 0; i < 100 && (inb(0x61) & 0x10) == last; i++)
+            ;
+    }
+}
+
+static int
+pmc_ready(void)
+{
+    u32 i;
+    for (i = 0; i < 0x10000; i++)
+        if (inb(PMC_STATUS) & 1)
+            return 1;
+    return 0;
+}
+
+// Command BL after the prefix BH if its bit 7 is set, each byte as nibbles with bit 4 set; the reply if BH bit 6
+// (IBM F000:617F); -1 if the controller is not ready.
+static int
+pmc_send(u16 cmd)
+{
+    u8 bh = cmd >> 8, bl = cmd;
+    if (bh & 0x80) {
+        if (!pmc_ready())
+            return -1;
+        outb(bh | 0x10, PMC_DATA);
+    }
+    if (!pmc_ready())
+        return -1;
+    outb((bl >> 4) | 0x10, PMC_DATA);
+    if (!pmc_ready())
+        return -1;
+    outb(bl | 0x10, PMC_DATA);
+    if (!(bh & 0x40))
+        return 0;
+    return pmc_ready() ? inb(PMC_DATA) : -1;
+}
+
+// Ready, then a 0 among 8 reads (IBM F000:6110)
+static int
+pmc_idle(void)
+{
+    int i;
+    for (i = 0; i < 1000 && !(inb(PMC_STATUS) & 1); i++)
+        ;
+    if (i == 1000)
+        return 0;
+    for (i = 0; i < 1000; i++) {
+        u8 all = 1, j;
+        for (j = 0; j < 8; j++)
+            all &= inb(PMC_STATUS);
+        if (!(all & 1))
+            return 1;
+    }
+    return 0;
+}
+
+// IBM F000:5FB8: the handshake, retried 5 times, then after a reset pulse; 0Ah and 4Ah clear and set status 8Ah bit 0
+static int
+pmc_present(void)
+{
+    int i, ok = pmc_idle();
+    for (i = 0; i < 5 && !ok; i++) {
+        refresh_wait(0x8000);
+        ok = pmc_idle();
+    }
+    if (!ok) {
+        outb(1, PMC_STATUS);
+        refresh_wait(0xea60);
+        outb(0, PMC_STATUS);
+        refresh_wait(0x7530);
+        pmc_send(0x30);
+        ok = pmc_idle();
+    }
+    return ok && pmc_send(0x0a) == 0 && pmc_send(0x408a) == 0 && pmc_send(0x4a) == 0 && pmc_send(0x408a) == 1;
+}
+
+// The IBM BIOS's init at POST (5FEA-602A, 6030-603A, 60E9-60FB, without its CMOS power history), then its soft off
+// (5424-5436): no wake on ring or alarm (61D1: 15h, 04h), 0Eh, 4Dh, 4057h.
+u16 PmcOff[] VARFSEG = {
+    0x8d2e, 0x8e02, 0x6d, 0x8d13, 0, 0x15, 0x04, 0x40b0, 0x30, 0x4e, 0x8d02, 0x8eac, 0x15, 0x04, 0x0e, 0x4d, 0x4057
+};
+
+static void
+pmc_off(void)
+{
+    if (!pmc_present())
+        return;
+    outb(0x80, 0x70);
+    u8 sec = inb(0x71);
+    u32 i;
+    for (i = 0; i < ARRAY_SIZE(PmcOff); i++) {
+        u16 cmd = GET_GLOBAL(PmcOff[i]);
+        pmc_send(cmd ? cmd : 0x8e00 | (60 - (sec >> 4) * 10 - (sec & 0x0f)));   // seconds to the next minute
+    }
+    refresh_wait(2 * 0xfa00);
+}
+#endif
+
+// Power off: the Aptiva's controller (if it answers), ACPI; then as the IBM BIOS (F000:5447-5461): CMOS 0Fh = 0,
+// 8042 reset pulse.
 void
 apm_shutdown(void)
 {
+    irq_disable();
+#if CONFIG_NEWBIOS_BOARD_APTIVA2168
+    pmc_off();
+    outb(0x8f, 0x70);
+    outb(0, 0x71);
+    outb(0xfe, 0x64);
+#endif
     u16 pm1a_cnt = GET_GLOBAL(acpi_pm1a_cnt);
     if (pm1a_cnt)
         outw(0x2000, pm1a_cnt);
 
-    irq_disable();
     for (;;)
         hlt();
 }
