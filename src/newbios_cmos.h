@@ -17,7 +17,7 @@
 #define NB_CMOS_SUM       0x7c   /* big-endian 16-bit sum of NB_CMOS_BASE..NB_CMOS_SIG */
 #define NB_CMOS_BOOTFAIL  0x7e   /* POSTs started (coreboot) since the last completed one (SeaBIOS) */
 #define NB_CMOS_CPUSIG    0x7f   /* CPU family << 4 | model from DX at reset (bootblock), for CPUs without CPUID */
-#define NB_SIG_VALUE      0xa7   /* layout version: change when indexes, meanings or defaults change (test/cmoslayout.sh) */
+#define NB_SIG_VALUE      0xa8   /* layout version: change when indexes, meanings or defaults change (test/cmoslayout.sh) */
 #define NB_LAYOUT_COUNT   65     /* NB_COUNT of this version (setup.c checks it) */
 #define NB_BOOTFAIL_MAX   2      /* coreboot falls back to chipset defaults after this many failures */
 #define NB_HDD_NONE       1      /* drive types: 0 auto, 1 none, 2-47 type 1-46 (16: reserved 15), 48 user */
@@ -95,6 +95,9 @@ struct nb_field {
 	{ NB_HOST_PCI_CLOCK,    0, 0x01, 0x30, 4, { 0x00, 0x10, 0x20, 0x30 } },	/* refresh RAS# pulse 7..4 CLKs */ \
 	{ NB_SLOW_REFRESH,      0, 0x12, 0x0c, 2, { 0x00, 0x08 } },	/* refresh on each REFRESH#, 1 in 4 */ \
 	{ NB_PCI_POSTED_WRITE,  0, 0x02, 0x02, 2, { 0x00, 0x02 } },	/* DRAM posted write */ \
-	{ NB_BURST_COPYBACK,    0, 0x08, 0x04, 2, { 0x00, 0x04 } },	/* CPU address pipelining */
+	{ NB_BURST_COPYBACK,    0, 0x08, 0x04, 2, { 0x00, 0x04 } },	/* CPU address pipelining */ \
+	{ NB_EARLY_CACHE_WRITE, 0, 0x08, 0x02, 2, { 0x00, 0x02 } },	/* L1 write-through, write-back (postcar) */ \
+	{ NB_HOST_PCI_BURST,    0, 0x0f, 0x80, 2, { 0x00, 0x80 } },	/* PCI pre-snoop */ \
+	{ NB_PREEMPT_PCI,       0, 0x08, 0x20, 2, { 0x20, 0x00 } },	/* HITM# sampled without delay, one CLK later */
 
 #endif

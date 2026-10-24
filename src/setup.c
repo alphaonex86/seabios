@@ -54,7 +54,8 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_COM2] = 1,                              // over the value above: COM2 at 2F8h, as the IBM BIOS sets it
     // manual chipset values: the IBM BIOS's at 60/66 MHz (NB_VIPERM_FIELDS)
     [NB_DRAM_READ_WS] = 1, [NB_DRAM_WRITE_WS] = 1, [NB_L2_WS] = 1, [NB_HOST_PCI_CLOCK] = 1, [NB_PCI_POSTED_WRITE] = 1,
-    [NB_BURST_COPYBACK] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1,
+    [NB_BURST_COPYBACK] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1, [NB_EARLY_CACHE_WRITE] = 1,
+    [NB_HOST_PCI_BURST] = 1,
 #endif
 };
 
@@ -1017,6 +1018,9 @@ static const struct item ChipItems[] = {        // the settings of NB_VIPERM_FIE
     ENUM(12, 2, 29, NB_BURST_COPYBACK, "CPU Address Pipelining   :", OffOn, F_MANUAL),
     ENUM(14, 2, 29, NB_SYSBIOS_CACHE, "System BIOS Cacheable    :", OffOn, 0),
     ENUM(15, 2, 29, NB_VIDBIOS_CACHE, "Video  BIOS Cacheable    :", OffOn, 0),
+    ENUM(4, 42, 68, NB_EARLY_CACHE_WRITE, "L1 Cache Write-Back     :", OffOn, F_MANUAL),
+    ENUM(5, 42, 68, NB_HOST_PCI_BURST, "PCI Pre-Snoop           :", OffOn, F_MANUAL),
+    ENUM(6, 42, 68, NB_PREEMPT_PCI, "HITM# Sampled 1 CLK Late:", OffOn, F_MANUAL),
 };
 #endif
 
