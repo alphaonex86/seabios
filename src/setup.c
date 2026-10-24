@@ -1550,8 +1550,8 @@ info_simms(int row)
 }
 
 #if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
-// DRAM timing (01h) and the SIMM pairs as coreboot set their banks: J23/J24 RAS0#/RAS1# (13h), J27/J28 RAS2#/RAS3#
-// (14h), each side a 64-bit bank of 1 << code MB on the two SIMMs.
+// DRAM timing (01h) and the SIMM pairs as coreboot set their banks: J23/J24 RAS0#/RAS1# (13h), J27/J28 RAS4#/RAS5#
+// (19h), each side a 64-bit bank of 1 << code MB on the two SIMMs.
 static void
 info_viperm(int row, u32 bus)
 {
@@ -1559,7 +1559,7 @@ info_viperm(int row, u32 bus)
     info_printf(row++, "DRAM timing    : at %d MHz (bus), RAS# precharge %d, CAS# read %d, write %d CLKs", bus,
                 6 - (r01 & 3), 3 - (r01 >> 3 & 1), 3 - (r01 >> 2 & 1));
     for (int pair = 0; pair < 2; pair++) {
-        u8 banks = viperm_read(0x13 + pair), side0 = banks & 7, side1 = banks >> 4 & 7;
+        u8 banks = viperm_read(pair ? 0x19 : 0x13), side0 = banks & 7, side1 = banks >> 4 & 7;
         const char *name = pair ? "J27/J28" : "J23/J24";
         if (side0 || side1)
             info_printf(row++, "SIMM %s   : 2 x %d MB %s-sided", name,
