@@ -1043,6 +1043,10 @@ ata_detect(void *data)
             noslave = ata_detect_drive(&dummy, &didreset);
         setup_ide_detect(idx, 1);
     }
+    dummy.slave = 0;
+    int idx = ata_setup_index(&dummy);
+    if (CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM && idx >= 0)
+        setup_ide_channel(idx >> 1);
 }
 
 // Initialize an ata controller and detect its drives.

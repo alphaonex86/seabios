@@ -331,8 +331,20 @@ onboard_ide(void)
     return pci_config_readw(IDE_BDF, PCI_VENDOR_ID) == 0x1045;
 }
 
-// MIDE: its I/O decode is the whole controller, 40h bit 3 turns the secondary channel off; PIO timings at their
-// slowest until the drives are found (a CPU-only reset keeps them).
+// MIDE index registers of a channel (IBM BIOS E000:321C): after two 16-bit reads of base + 1, base + 2 = 03h opens
+// them in place of the drive's, 80h closes them.
+static u16
+mide_open(int channel)
+{
+    u16 base = channel ? PORT_ATA2_CMD_BASE : PORT_ATA1_CMD_BASE;
+    inw(base + 1);
+    inw(base + 1);
+    outb(0x03, base + 2);
+    return base;
+}
+
+// MIDE as the IBM BIOS (E000:31DF-3263): 32-byte FIFO, its I/O decode the whole controller, 40h bit 3 the secondary
+// channel off; each channel on its slowest timing (PCI 40h mode 0) until its drives are found, read prefetch on.
 static void
 ide_channels_apply(void)
 {
@@ -340,9 +352,19 @@ ide_channels_apply(void)
         return;
     u16 cmd = pci_config_readw(IDE_BDF, PCI_COMMAND) & ~PCI_COMMAND_IO;
     pci_config_writew(IDE_BDF, PCI_COMMAND, cmd | (Setting[NB_IDE_PRIMARY] ? PCI_COMMAND_IO : 0));
-    u8 v = pci_config_readb(IDE_BDF, 0x40) & ~0x0b;
-    pci_config_writeb(IDE_BDF, 0x40, v | (Setting[NB_IDE_SECONDARY] ? 0 : 0x08));
+    pci_config_writeb(IDE_BDF, 0x40, 0x24 | (Setting[NB_IDE_SECONDARY] ? 0 : 0x08));
     pci_config_writeb(IDE_BDF, 0x43, 0);
+    int channel;
+    for (channel = 0; channel < 2; channel++) {
+        if (!Setting[NB_IDE_PRIMARY] || (channel && !Setting[NB_IDE_SECONDARY]))
+            continue;
+        u16 base = mide_open(channel);
+        outb(0x01, base + 3);
+        if (!channel)
+            outb(inb(base + 5) | 0x80, base + 5);
+        outb(0x40, base + 6);
+        outb(0x80, base + 2);
+    }
 }
 #else
 static int
@@ -391,20 +413,66 @@ setup_ide_pio(int idx, u16 *identify)
 }
 
 #if CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
-static u8 MideMode = 3;   // the slowest drive's PIO mode, at most 3
+static u8 MidePio4;   // a bit per drive in PIO mode 4
 
-// MIDE timings for one drive: 40h[1:0] is the cycle time of every drive (PIO 0-3: the slowest drive's), 43h two bits
-// per drive for PIO 4 (01), as the IBM BIOS sets them.
+// The IBM BIOS's MIDE timings by bus clock (JP2: 66, invalid, 60, 50 MHz; E000:326E, 3278, 3282) and PIO mode:
+// address setup (1F6h), then pulse and recovery (1F0h read, 1F1h write).
+static const u8 MideTiming[3][5][2] = {
+    { { 0x20, 0x68 }, { 0x10, 0x53 }, { 0x10, 0x31 }, { 0x10, 0x20 }, { 0x00, 0x40 } },
+    { { 0x20, 0x57 }, { 0x10, 0x43 }, { 0x10, 0x30 }, { 0x10, 0x20 }, { 0x00, 0x40 } },
+    { { 0x10, 0x46 }, { 0x10, 0x32 }, { 0x00, 0x21 }, { 0x00, 0x40 }, { 0x00, 0x40 } },
+};
+
+// MIDE timing registers of one drive (IBM BIOS E000:328C): its index (1F6h bit 0, the slave's address setup at least
+// the master's), timing registers A for the master and B for the slave (1F3h = 95h); PIO 4 waits for the channel.
 void
 setup_ide_timing(int idx, u8 mode)
 {
+    static const u8 bus_table[4] = { 0, 0, 1, 2 };
     if (!onboard_ide() || mode > 4)
         return;
-    if (mode < MideMode)
-        MideMode = mode;
-    pci_config_writeb(IDE_BDF, 0x40, (pci_config_readb(IDE_BDF, 0x40) & ~3) | MideMode);
-    u8 e = pci_config_readb(IDE_BDF, 0x43) & ~(3 << 2 * idx);
-    pci_config_writeb(IDE_BDF, 0x43, e | (mode == 4) << 2 * idx);
+    outb(0x02, 0xea);
+    const u8 *t = MideTiming[bus_table[inb(0xeb) & 3]][mode];
+    int slave = idx & 1;
+    u16 base = mide_open(idx >> 1);
+    u8 setup = t[0];
+    if (slave && (inb(base + 6) & 0x30) > setup)
+        setup = inb(base + 6) & 0x30;
+    outb(setup | slave, base + 6);
+    outb(t[1], base);
+    outb(t[1], base + 1);
+    if (!slave)
+        outb(0x95, base + 3);
+    outb(0x80, base + 2);
+    if (mode == 4)
+        MidePio4 |= 1 << idx;
+}
+
+// A channel's drives found (IBM BIOS E000:3366): its PIO 4 drives on PCI 40h mode 3 with 43h mode 4 (01b per drive),
+// any other one on timing register A (index 0, which gets the slave's values), timing registers B off.
+void
+setup_ide_channel(int channel)
+{
+    if (!onboard_ide())
+        return;
+    u8 pio4 = MidePio4 >> 2 * channel & 3;
+    u16 base = mide_open(channel);
+    u8 misc = inb(base + 6) & ~1;
+    outb(misc | 1, base + 6);
+    if (pio4 == 1) {
+        u8 slave = inb(base);
+        outb(misc, base + 6);
+        outb(slave, base);
+        outb(slave, base + 1);
+    }
+    if (pio4) {
+        static const u8 ctrl[4] = { 0, 0x09, 0x05, 0x01 };
+        outb((inb(base + 3) & 0x73) | ctrl[pio4], base + 3);
+        u8 e = pci_config_readb(IDE_BDF, 0x43);
+        pci_config_writeb(IDE_BDF, 0x43, e | ((pio4 & 1) | (pio4 & 2) << 1) << 4 * channel);
+        pci_config_writeb(IDE_BDF, 0x40, pci_config_readb(IDE_BDF, 0x40) | 3);
+    }
+    outb(0x80, base + 2);
 }
 #else
 // UM8886BF timings for one drive (the values of the coreboot_486 IDE driver for PIO 0-4).

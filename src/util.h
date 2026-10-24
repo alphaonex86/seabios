@@ -85,6 +85,7 @@ void setup_ide_geometry(int idx, struct chs_s *lchs);
 int setup_ide_index(int pci_bdf, int ataid, int slave);
 u8 setup_ide_pio(int idx, u16 *identify);
 void setup_ide_timing(int idx, u8 mode);
+void setup_ide_channel(int channel);
 struct drive_s;
 void setup_ide_report(int idx, struct drive_s *drive, u16 *identify, int atapi, u8 pio, u8 multiple);
 void setup_ide_detect(int idx, int done);
