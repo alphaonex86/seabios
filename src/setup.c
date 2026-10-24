@@ -52,6 +52,7 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_SLOW_REFRESH] = 1,
 #elif CONFIG_NEWBIOS_CHIPSET_OPTI_VIPERM
     [NB_COM2] = 1,                              // over the value above: COM2 at 2F8h, as the IBM BIOS sets it
+    [NB_FLOPPY_A] = 0,                          // the operator's drive A is dead: none, so no F1 halt on error 80
     // manual chipset values: the IBM BIOS's at 60/66 MHz (NB_VIPERM_FIELDS)
     [NB_DRAM_READ_WS] = 1, [NB_DRAM_WRITE_WS] = 1, [NB_L2_WS] = 1, [NB_HOST_PCI_CLOCK] = 1, [NB_PCI_POSTED_WRITE] = 1,
     [NB_BURST_COPYBACK] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1, [NB_EARLY_CACHE_WRITE] = 1,
