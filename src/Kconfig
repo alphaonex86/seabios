@@ -148,6 +148,11 @@ menu "Setup utility tools"
         default y
 endmenu
 
+config NEWBIOS_NBMON
+    depends on SETUP_MENU
+    bool "NBMON: monitor on COM1 (memory, I/O, payload calls), 2 s window in each POST"
+    default n
+
 choice
     prompt "Board"
     default NEWBIOS_BOARD_MB8433

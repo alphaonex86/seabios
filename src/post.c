@@ -280,6 +280,7 @@ maininit(void)
         post_code(POST_PROMPT);
     }
 
+    nbmon_post();
     // Allow user to modify overall boot order.
     interactive_bootmenu();
     wait_threads();
@@ -392,6 +393,7 @@ handle_post(void)
         return;
 
     serial_debug_preinit();
+    nbmon_start();
     debug_banner();
 
     // Check if we are running under Xen.
