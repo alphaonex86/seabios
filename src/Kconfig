@@ -173,6 +173,13 @@ choice
             FDC37C93x super I/O, Pentium P54C. No ESCD: its 28F010 flash
             only erases as a whole.
 
+    config NEWBIOS_BOARD_AO486
+        bool "ao486 FPGA core (ISA PC, no coreboot)"
+        help
+            ao486 soft CPU with an ISA-only PC around it. No coreboot: the
+            ROM image starts at the reset vector, in RAM at E0000-FFFFF,
+            with its pristine copy below 4 GiB.
+
     config NEWBIOS_BOARD_GENERIC
         bool "No board-specific code"
         help

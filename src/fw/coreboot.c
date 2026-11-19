@@ -205,6 +205,11 @@ coreboot_preinit(void)
 {
     if (!CONFIG_COREBOOT)
         return;
+    if (CONFIG_NEWBIOS_BOARD_AO486) {
+        // No coreboot table: the core's 64 MiB SDRAM, whose last 128 KiB hold the ROM's pristine copy
+        e820_add(0, 64*1024*1024 - 128*1024, E820_RAM);
+        return;
+    }
 
     dprintf(3, "Attempting to find coreboot table\n");
 

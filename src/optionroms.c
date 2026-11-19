@@ -611,8 +611,9 @@ vgarom_setup(void)
     // NOTICE expect writeable
     // NOTICE probably no caching
 
-    // Clear option rom memory
-    memset((void*)BUILD_ROM_START, 0, rom_get_max() - BUILD_ROM_START);
+    // Clear option rom memory (not the ao486 core's: its VGA BIOS is already at C0000)
+    if (!CONFIG_NEWBIOS_BOARD_AO486)
+        memset((void*)BUILD_ROM_START, 0, rom_get_max() - BUILD_ROM_START);
 
 // dprintf(1, " SSS %x\n", rom_get_max() - BUILD_ROM_START);
 

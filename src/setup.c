@@ -31,6 +31,9 @@
 #if CONFIG_NEWBIOS_BOARD_APTIVA2168     // bios_name.h is the MB-8433's (its coreboot has the same file)
 #undef BIOS_NAME
 #define BIOS_NAME "aptiva2168"
+#elif CONFIG_NEWBIOS_BOARD_AO486
+#undef BIOS_NAME
+#define BIOS_NAME "ao486"
 #endif
 
 u8 Setting[NB_COUNT];
@@ -57,6 +60,8 @@ static const u8 Defaults[NB_COUNT] = {
     [NB_DRAM_READ_WS] = 1, [NB_DRAM_WRITE_WS] = 1, [NB_L2_WS] = 1, [NB_HOST_PCI_CLOCK] = 1, [NB_PCI_POSTED_WRITE] = 1,
     [NB_BURST_COPYBACK] = 1, [NB_SYSBIOS_CACHE] = 1, [NB_VIDBIOS_CACHE] = 1, [NB_EARLY_CACHE_WRITE] = 1,
     [NB_HOST_PCI_BURST] = 1,
+#elif CONFIG_NEWBIOS_BOARD_AO486
+    [NB_FLOPPY_A] = 0,                          // the core's HPS daemon serves no diskette
 #endif
 };
 

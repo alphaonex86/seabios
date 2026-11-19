@@ -13,6 +13,7 @@
 #include "hw/pci_regs.h" // PCI_VENDOR_ID
 #include "malloc.h" // rom_get_last
 #include "output.h" // dprintf
+#include "hw/ps2port.h" // PORT_PS2_STATUS
 #include "paravirt.h" // runningOnXen
 #include "string.h" // memset
 #include "util.h" // make_bios_writable
@@ -350,7 +351,7 @@ make_bios_readonly(void)
 void
 qemu_reboot(void)
 {
-    if (!CONFIG_QEMU || runningOnXen())
+    if (!(CONFIG_QEMU || CONFIG_NEWBIOS_BOARD_AO486) || runningOnXen())
         return;
     // QEMU doesn't map 0xc0000-0xfffff back to the original rom on a
     // reset, so do that manually before invoking a hard reset.
@@ -379,6 +380,9 @@ qemu_reboot(void)
     // Request a QEMU system reset.  Do the reset in this function as
     // the BIOS code was overwritten above and not all BIOS
     // functionality may be available.
+
+    if (CONFIG_NEWBIOS_BOARD_AO486)
+        outb(0xfe, PORT_PS2_STATUS);   // keyboard controller reset: the core has no port CF9h
 
     // Attempt PCI style reset
     outb(0x02, PORT_PCI_REBOOT);

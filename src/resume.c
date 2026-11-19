@@ -145,6 +145,8 @@ tryReboot(void)
 
     // Use a QEMU specific reboot on QEMU
     // qemu_reboot();
+    if (CONFIG_NEWBIOS_BOARD_AO486)
+        qemu_reboot();   // no coreboot to reload the image: restore it from the ROM, then reset
 
     // Reboot using ACPI RESET_REG
     // acpi_reboot();
